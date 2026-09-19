@@ -58,8 +58,8 @@ export default function (pi: ExtensionAPI) {
   let isFlushing = false;
 
   type FlushResult =
-    | { ok: true; reason: "flushed" | "skipped-oversized"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
-    | { ok: false; reason: "empty" | "already-flushing" | "summarizer-failed" | "stale-context" | "failed" | "aborted"; error?: string };
+    | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
+    | { ok: false; reason: "empty" | "already-flushing" | "summarizer-failed" | "stale-context" | "failed" | "aborted" | "cancelled"; error?: string };
 
   type SessionAppender = {
     appendCustomEntry(customType: string, data?: unknown): string;
@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
         const workerCount = Math.min(8, batches.length);
         await Promise.all(
           Array.from({ length: workerCount }, async () => {
-            while (nextIndex < batches.length) {
+            while (nextIndex < batches.length && !options.signal?.aborted) {
               const index = nextIndex++;
               const batch = batches[index];
               if (isSmallBatch(batch)) {
@@ -221,7 +221,9 @@ export default function (pi: ExtensionAPI) {
               }
               options.onProgress!(index, batches.length, batch, "start");
               const result = await summarizeBatch(batch, currentConfig.value, ctx, {
-                signal: options.signal,
+                // Manual cancellation is soft: finish already-started calls so their
+                // completed summaries can still be indexed, but do not start another.
+                signal: undefined,
                 onTextProgress: (receivedChars) => {
                   reportBatchTextProgress(index, batches.length, batch, receivedChars);
                 },
@@ -244,6 +246,7 @@ export default function (pi: ExtensionAPI) {
           isSmallBatch(batch) ? { skippedSmall: true } : summarizedResults[summarizedIndex++],
         );
       }
+      const wasCancelled = options.signal?.aborted === true;
 
       // Process results in order; stop at first null (individual call failure).
       // Batches before the first failure are persisted; remaining are restored to
@@ -268,6 +271,7 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
         if (!result) {
+          if (wasCancelled) continue;
           firstFailureIndex = i;
           break;
         }
@@ -317,27 +321,49 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Restore unprocessed batches (those at and after the first failure)
-      if (firstFailureIndex >= 0) {
+      // Restore only the work that did not finish after a manual cancellation.
+      // Completed batches are already indexed below and must not be retried.
+      if (wasCancelled) {
+        restoreBatches(batches.filter((_, index) => results[index] === null));
+      } else if (firstFailureIndex >= 0) {
         restoreBatches(batches.slice(firstFailureIndex));
       }
 
       if (processedBatches.length === 0) {
-        // Nothing was persisted (all calls failed or first call failed)
+        // Nothing was persisted (all calls failed, or cancellation came before
+        // any in-flight batch completed).
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
-        return { ok: false, reason: "summarizer-failed" };
+        return { ok: false, reason: wasCancelled ? "cancelled" : "summarizer-failed" };
       }
 
-      // Advance frontier to the last batch we actually processed.
-      const lastBatch = processedBatches[processedBatches.length - 1];
-      const lastTC = lastBatch.toolCalls[lastBatch.toolCalls.length - 1];
+      // A cancellation can leave successful later workers behind an unfinished
+      // earlier batch. Only advance the frontier through the contiguous prefix;
+      // the index still prevents later completed batches from being retried.
+      const firstUnfinishedIndex = wasCancelled ? results.findIndex((result) => result === null) : -1;
+      const frontierBatches = wasCancelled && firstUnfinishedIndex >= 0
+        ? batches.slice(0, firstUnfinishedIndex)
+        : processedBatches;
       const allOversized = oversizedBatches.length === processedBatches.length;
       const allSmall = smallBatchCount === processedBatches.length;
+      if (frontierBatches.length === 0) {
+        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
+        return {
+          ok: true,
+          reason: "cancelled",
+          batchCount: processedBatches.length,
+          toolCallCount: totalToolCallCount,
+          rawCharCount: totalRawCharCount,
+          summaryCharCount: totalSummaryCharCount,
+        };
+      }
+      const lastBatch = frontierBatches[frontierBatches.length - 1];
+      const lastTC = lastBatch.toolCalls[lastBatch.toolCalls.length - 1];
       const frontierSnapshot: PruneFrontier = {
         lastAttemptedToolCallId: lastTC.toolCallId,
         lastAttemptedToolName: lastTC.toolName,
         lastAttemptedTurnIndex: lastBatch.turnIndex,
         lastAttemptedTimestamp: lastBatch.timestamp,
-        attemptedBatchCount: processedBatches.length,
+        attemptedBatchCount: frontierBatches.length,
         attemptedToolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,
         summaryCharCount: totalSummaryCharCount,
@@ -380,7 +406,7 @@ export default function (pi: ExtensionAPI) {
 
       return {
         ok: true,
-        reason: allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "flushed",
+        reason: wasCancelled ? "cancelled" : allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "flushed",
         batchCount: processedBatches.length,
         toolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,

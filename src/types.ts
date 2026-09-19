@@ -379,9 +379,8 @@ export interface FlushOptions {
    */
   previewedBatches?: CapturedBatch[];
   /**
-   * Abort signal — when fired the in-flight summarization is cancelled and
-   * `flushPending` returns `{ ok: false, reason: "aborted" }` without advancing
-   * the frontier. All pending batches are restored so the next flush can retry.
+   * When `/pruner now` supplies this signal, cancellation is soft: no more
+   * batches are scheduled, but already-started summaries finish and are kept.
    */
   signal?: AbortSignal;
 }

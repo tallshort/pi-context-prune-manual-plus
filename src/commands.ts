@@ -200,7 +200,7 @@ Usage:
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
-  /pruner now                              Flush pending tool calls immediately (shows live widget progress above the editor)
+  /pruner now                              Flush pending tool calls immediately (Esc/q stops scheduling new batches; running ones finish and are retained)
   /pruner help                             Show this help
 
 Agentic-auto reminder:
@@ -360,7 +360,7 @@ export function registerCommands(
   pi: ExtensionAPI,
   currentConfig: { value: ContextPruneConfig },
   flushPending: (ctx: ExtensionCommandContext, options?: FlushOptions) => Promise<
-    | { ok: true; reason: "flushed" | "skipped-oversized"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
+    | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
     | { ok: false; reason: string; error?: string }
   >,
   capturePendingBatches: (ctx: ExtensionCommandContext) => CapturedBatch[],
@@ -748,10 +748,39 @@ export function registerCommands(
           }
 
           // Open the progress widget above the editor — one row per batch.
+          // Keep the progress widget visible beneath a small cancellation overlay.
+          // Esc/q requests a soft stop: active calls finish and persist, while no
+          // additional batches are scheduled.
+          const controller = new AbortController();
+          let closeCancellationOverlay: (() => void) | undefined;
+          const cancellationOverlay = (ctx as any).hasUI
+            ? ctx.ui.custom<void>(
+                (_tui, theme, _keybindings, done) => {
+                  closeCancellationOverlay = () => done(undefined);
+                  const message = new Text(
+                    `${theme.fg("accent", "pruner now running")}\n${theme.fg("dim", "Press Esc or q to stop scheduling new batches.")}`,
+                    1,
+                    1,
+                  );
+                  (message as any).onKey = (key: string) => {
+                    if (key === "escape" || key === "\x1b" || key === "q") {
+                      controller.abort();
+                      done(undefined);
+                      return true;
+                    }
+                    return true;
+                  };
+                  return message;
+                },
+                { overlay: true, overlayOptions: { width: 58, anchor: "bottom" } },
+              )
+            : undefined;
+
           const { updateRow, clearWidget } = startPrunerWidget(ctx, batches);
 
           const result = await flushPending(ctx, {
             previewedBatches: batches,
+            signal: controller.signal,
             onProgress: (index, _total, _batch, stage) => {
               if (stage === "start") {
                 updateRow(index, "running", 0);
@@ -766,13 +795,24 @@ export function registerCommands(
             },
           });
 
+          closeCancellationOverlay?.();
+          await cancellationOverlay;
+
           // Remove the widget and restore the normal footer status.
           clearWidget();
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";
-            ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, result.reason === "empty" ? "info" : "warning");
+            const message = controller.signal.aborted || result.reason === "cancelled"
+              ? "pruner: cancelled before any batch completed; all work remains pending"
+              : `pruner: nothing flushed — ${result.reason}${suffix}`;
+            ctx.ui.notify(message, result.reason === "empty" ? "info" : "warning");
+            break;
+          }
+          if (result.reason === "cancelled") {
+            const remaining = Math.max(0, batches.length - result.batchCount);
+            ctx.ui.notify(`pruner: cancellation complete — retained ${result.batchCount} completed batch(es); ${remaining} remain pending`, "info");
             break;
           }
 
