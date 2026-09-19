@@ -235,6 +235,7 @@ Settings are saved to ~/.pi/agent/context-prune/settings.json`;
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const SPINNER_INTERVAL_MS = 120;
+const MAX_PROGRESS_ROWS = 10;
 
 type RowStatus = "pending" | "running" | "done" | "skipped";
 
@@ -311,7 +312,10 @@ function startPrunerWidget(
       return {
         invalidate() {},
         render(_width: number): string[] {
-          return rows.map((row) => {
+          const runningIndex = rows.findIndex((row) => row.status === "running");
+          const windowEnd = runningIndex < 0 ? rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
+          const visibleRows = rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
+          return visibleRows.map((row) => {
             const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
             if (row.status === "running") {
               const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
