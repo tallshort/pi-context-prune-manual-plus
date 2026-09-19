@@ -300,10 +300,14 @@ export interface SummarizerStats {
   totalCost: number;
   /** Number of summarizer LLM calls made */
   callCount: number;
+  /** Raw tool-result characters replaced by accepted summaries */
+  totalPrunedRawChars: number;
+  /** Characters in accepted rendered summaries */
+  totalPrunedSummaryChars: number;
 }
 
 /** Outcome of the most recent completed prune attempt. */
-export type PruneFrontierOutcome = "summarized" | "skipped-oversized";
+export type PruneFrontierOutcome = "summarized" | "skipped-oversized" | "skipped-small";
 
 /**
  * Snapshot of the last successfully completed prune attempt boundary.
@@ -334,8 +338,9 @@ export interface PruneFrontier {
 }
 
 /**
- * Progress callback invoked by `flushPending` when processing batches sequentially.
- * Only fired when the caller passes `onProgress` in `FlushOptions` (i.e. `/pruner now`).
+ * Progress callback invoked by `flushPending` for every batch lifecycle event.
+ * `/pruner now` uses it to drive its multi-row progress widget while running a
+ * bounded number of summary calls concurrently.
  */
 export type ProgressCallback = (
   index: number,
@@ -357,9 +362,8 @@ export interface FlushOptions {
   /** Delivery path: "runtime" uses sendMessage/steer (default); "session" writes directly to session. */
   delivery?: "runtime" | "session";
   /**
-   * When provided, batches are processed sequentially (one LLM call each) instead of
-   * in parallel, and this callback is invoked before/after each batch. Used by
-   * `/pruner now` to drive the multi-row progress overlay.
+   * Receives each batch's start/completion lifecycle event. Used by `/pruner now`
+   * to drive the multi-row progress overlay while summary calls run concurrently.
    */
   onProgress?: ProgressCallback;
   /**

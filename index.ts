@@ -21,9 +21,9 @@ import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
-import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
+import { registerCommands, pruneStatusText, setPruneStatusWidget } from "./src/commands.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
-import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions } from "./src/types.js";
+import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions, SummarizeResult } from "./src/types.js";
 import {
   DEFAULT_CONFIG,
   CONTEXT_PRUNE_TOOL_NAME,
@@ -150,9 +150,8 @@ export default function (pi: ExtensionAPI) {
   };
 
   // Summarizes + indexes all pending batches.
-  // When options.onProgress is provided batches are processed sequentially
-  // (one LLM call each) so the caller can update per-row UI. Otherwise all
-  // batches are summarized in parallel (one summarizeBatches call).
+  // Summarizes + indexes all pending batches. `/pruner now` uses bounded
+  // concurrency so callers can update per-row UI; other paths summarize in parallel.
   // Runtime delivery is used while the agent/tool loop is active so Pi can place
   // steer messages at protocol-safe boundaries. Session delivery is used only for
   // agent-message's final-message flush, where print-mode Pi may invalidate pi.*
@@ -198,30 +197,52 @@ export default function (pi: ExtensionAPI) {
       const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
         options.onBatchTextProgress?.(index, total, batch, receivedChars);
       };
+      const isSmallBatch = (batch: CapturedBatch) =>
+        batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0) <= 600;
+      type BatchResult = SummarizeResult | { skippedSmall: true } | null;
 
-      // Summarize batches. When onProgress is provided (i.e. /pruner now with the
-      // multi-row overlay) we process sequentially so each row can be checked off
-      // as its LLM call completes. Otherwise all batches run in parallel.
-      let results: (import("./src/types.js").SummarizeResult | null)[];
+      // `/pruner now` reports individual row state. Limit its concurrent calls so the
+      // widget remains responsive without overwhelming the summarizer provider.
+      // Other flush paths run fully parallel below.
+      let results: BatchResult[];
       if (options.onProgress) {
-        results = [];
-        for (let i = 0; i < batches.length; i++) {
-          options.onProgress(i, batches.length, batches[i], "start");
-          const r = await summarizeBatch(batches[i], currentConfig.value, ctx, {
-            signal: options.signal,
-            onTextProgress: (receivedChars) => {
-              reportBatchTextProgress(i, batches.length, batches[i], receivedChars);
-            },
-          });
-          results.push(r);
-          options.onProgress(i, batches.length, batches[i], r ? "done" : "skipped");
-        }
+        results = Array.from({ length: batches.length }, () => null);
+        let nextIndex = 0;
+        const workerCount = Math.min(8, batches.length);
+        await Promise.all(
+          Array.from({ length: workerCount }, async () => {
+            while (nextIndex < batches.length) {
+              const index = nextIndex++;
+              const batch = batches[index];
+              if (isSmallBatch(batch)) {
+                results[index] = { skippedSmall: true };
+                options.onProgress!(index, batches.length, batch, "skipped");
+                continue;
+              }
+              options.onProgress!(index, batches.length, batch, "start");
+              const result = await summarizeBatch(batch, currentConfig.value, ctx, {
+                signal: options.signal,
+                onTextProgress: (receivedChars) => {
+                  reportBatchTextProgress(index, batches.length, batch, receivedChars);
+                },
+              });
+              results[index] = result;
+              options.onProgress!(index, batches.length, batch, result ? "done" : "skipped");
+            }
+          })
+        );
       } else {
-        // Parallel — one LLM call per batch, all in flight simultaneously.
-        results = await summarizeBatches(batches, currentConfig.value, ctx, {
-          onBatchTextProgress: reportBatchTextProgress,
-          signal: options.signal,
-        });
+        const batchesToSummarize = batches.filter((batch) => !isSmallBatch(batch));
+        const summarizedResults = batchesToSummarize.length === 0
+          ? []
+          : await summarizeBatches(batchesToSummarize, currentConfig.value, ctx, {
+              onBatchTextProgress: reportBatchTextProgress,
+              signal: options.signal,
+            });
+        let summarizedIndex = 0;
+        results = batches.map((batch) =>
+          isSmallBatch(batch) ? { skippedSmall: true } : summarizedResults[summarizedIndex++],
+        );
       }
 
       // Process results in order; stop at first null (individual call failure).
@@ -232,21 +253,28 @@ export default function (pi: ExtensionAPI) {
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
       const oversizedBatches: CapturedBatch[] = [];
+      let smallBatchCount = 0;
       let firstFailureIndex = -1;
 
       for (let i = 0; i < batches.length; i++) {
         const result = results[i];
+        const batch = batches[i];
+        const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
+        if (result && "skippedSmall" in result) {
+          totalRawCharCount += batchRawCharCount;
+          totalToolCallCount += batch.toolCalls.length;
+          smallBatchCount += 1;
+          processedBatches.push(batch);
+          continue;
+        }
         if (!result) {
           firstFailureIndex = i;
           break;
         }
 
-        const batch = batches[i];
-        const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
         const summaryRefs = indexer.allocateSummaryRefs(batch);
         const summaryText = wrapSummaryForContext(result.summaryText + formatSummaryToolCallRefs(summaryRefs));
         const shouldSkipOversized = summaryText.length > batchRawCharCount;
-
         statsAccum.add(result.usage);
         totalRawCharCount += batchRawCharCount;
         totalSummaryCharCount += summaryText.length;
@@ -271,6 +299,7 @@ export default function (pi: ExtensionAPI) {
               indexer.registerSummaryRefs(summaryRefs);
               persistBatchIndex(batch, appendEntry);
             }
+            statsAccum.addPrunedChars(batchRawCharCount, summaryText.length);
           } else {
             oversizedBatches.push(batch);
           }
@@ -302,6 +331,7 @@ export default function (pi: ExtensionAPI) {
       const lastBatch = processedBatches[processedBatches.length - 1];
       const lastTC = lastBatch.toolCalls[lastBatch.toolCalls.length - 1];
       const allOversized = oversizedBatches.length === processedBatches.length;
+      const allSmall = smallBatchCount === processedBatches.length;
       const frontierSnapshot: PruneFrontier = {
         lastAttemptedToolCallId: lastTC.toolCallId,
         lastAttemptedToolName: lastTC.toolName,
@@ -311,7 +341,7 @@ export default function (pi: ExtensionAPI) {
         attemptedToolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,
         summaryCharCount: totalSummaryCharCount,
-        outcome: allOversized ? "skipped-oversized" : "summarized",
+        outcome: allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "summarized",
       };
 
       try {
@@ -338,7 +368,8 @@ export default function (pi: ExtensionAPI) {
       if (currentConfig.value.notifySkipped) {
         for (const batch of oversizedBatches) {
           const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-          const batchSummaryLen = results[batches.indexOf(batch)]?.summaryText.length ?? 0;
+          const batchResult = results[batches.indexOf(batch)];
+          const batchSummaryLen = batchResult && !("skippedSmall" in batchResult) ? batchResult.summaryText.length : 0;
           safeNotify(
             ctx,
             `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,
@@ -349,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 
       return {
         ok: true,
-        reason: allOversized ? "skipped-oversized" : "flushed",
+        reason: allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "flushed",
         batchCount: processedBatches.length,
         toolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,
@@ -463,30 +494,12 @@ export default function (pi: ExtensionAPI) {
     if (currentConfig.value.pruneOn === "every-turn") {
       await flushPending(ctx, { delivery: "session" });
     } else {
-      // Let the user know a batch is queued
       const n = pendingBatches.length;
-      let trigger: string;
-      switch (currentConfig.value.pruneOn) {
-        case "on-context-tag":
-          trigger = "next context_checkpoint";
-          break;
-        case "agent-message":
-          trigger = "agent's next text response";
-          break;
-        case "agentic-auto":
-          trigger = "agent calling context_prune";
-          break;
-        default:
-          trigger = "/pruner now";
-          break;
-      }
       if (currentConfig.value.showPruneStatusLine) {
-        setPruneStatusWidget(ctx, currentConfig.value, `prune: ${n} pending`);
-        safeNotify(
-          ctx,
-          `pruner: ${n} turn${n === 1 ? "" : "s"} queued — will summarize on ${trigger}`,
-          "info"
-        );
+        const statusText = currentConfig.value.pruneOn === "on-demand"
+          ? pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length)
+          : `prune: ${n} pending`;
+        setPruneStatusWidget(ctx, currentConfig.value, statusText);
       }
     }
   });
@@ -516,6 +529,11 @@ export default function (pi: ExtensionAPI) {
   // already be disposing the session, so avoid starting a best-effort LLM call here.
   pi.on("agent_end", async (_event, ctx) => {
     if (!currentConfig.value.enabled) return;
+    if (currentConfig.value.pruneOn === "on-demand") {
+      const pendingCount = capturePendingBatches(ctx).length;
+      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), pendingCount));
+      return;
+    }
     if (pendingBatches.length === 0) return;
     setPruneStatusWidget(ctx, currentConfig.value, `prune: ${pendingBatches.length} pending`);
   });

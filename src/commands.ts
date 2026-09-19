@@ -11,7 +11,7 @@ import {
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig } from "./config.js";
-import { formatTokens, formatCost, formatCharProgress } from "./stats.js";
+import { formatTokens, formatCost, formatCharProgress, formatTheoreticalSavings } from "./stats.js";
 import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
@@ -46,9 +46,10 @@ class SettingsOverlay extends Container {
 
 // ── Status widget text ──────────────────────────────────────────────────────
 
-export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerStats): string {
+export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerStats, pendingCount = 0): string {
   const mode = PRUNE_ON_MODES.find((m) => m.value === config.pruneOn)?.label ?? config.pruneOn;
-  let text = `prune: ${config.enabled ? "ON" : "OFF"} (${mode})`;
+  const pending = config.pruneOn === "on-demand" && pendingCount > 0 ? `, ${pendingCount} pending` : "";
+  let text = `prune: ${config.enabled ? "ON" : "OFF"} (${mode}${pending})`;
   if (stats && stats.callCount > 0) {
     text += ` │ ↑${formatTokens(stats.totalInputTokens)} ↓${formatTokens(stats.totalOutputTokens)} ${formatCost(stats.totalCost)}`;
   }
@@ -56,7 +57,7 @@ export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerSt
 }
 
 export function setPruneStatusWidget(
-  ctx: { ui: { setStatus: (id: string, text?: string) => void } },
+  ctx: { ui: { setStatus: (id: string, text?: string) => void; theme: { fg: (color: "dim", text: string) => string } } },
   config: ContextPruneConfig,
   value?: SummarizerStats | string,
 ): void {
@@ -64,7 +65,8 @@ export function setPruneStatusWidget(
     ctx.ui.setStatus(STATUS_WIDGET_ID, undefined);
     return;
   }
-  ctx.ui.setStatus(STATUS_WIDGET_ID, typeof value === "string" ? value : pruneStatusText(config, value));
+  const text = typeof value === "string" ? value : pruneStatusText(config, value);
+  ctx.ui.setStatus(STATUS_WIDGET_ID, ctx.ui.theme.fg("dim", text));
 }
 
 // ── Subcommand list (for completions & interactive picker) ──────────────────
@@ -303,7 +305,7 @@ function startPrunerWidget(
 
   ctx.ui.setWidget(
     PROGRESS_WIDGET_ID,
-    (tui, _theme) => {
+    (tui, theme) => {
       requestRender = () => tui.requestRender();
       syncAnimationLoop();
       return {
@@ -317,13 +319,13 @@ function startPrunerWidget(
                 row.receivedChars > 0
                   ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}`
                   : "";
-              return `${frame} ${row.label} · ${count}${chars}`;
+              return `${theme.fg("accent", frame)}${theme.fg("dim", ` ${row.label} · ${count}${chars}`)}`;
             } else if (row.status === "done") {
-              return `✓ ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`;
+              return `${theme.fg("success", "✓")}${theme.fg("dim", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
             } else if (row.status === "skipped") {
-              return `⚠ ${row.label} · ${count} · skipped`;
+              return theme.fg("dim", `⚠ ${row.label} · ${count} · skipped`);
             } else {
-              return `○ ${row.label} · ${count} · pending`;
+              return theme.fg("dim", `○ ${row.label} · ${count} · pending`);
             }
           });
         },
@@ -627,7 +629,7 @@ export function registerCommands(
             ctx.ui.notify("pruner stats: no summarizer calls yet.");
           } else {
             ctx.ui.notify(
-              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`,
+              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}${formatTheoreticalSavings(s, ctx.model) ? `\n  saved:       ${formatTheoreticalSavings(s, ctx.model)}` : ""}`,
             );
           }
           break;

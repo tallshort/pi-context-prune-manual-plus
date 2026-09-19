@@ -32,6 +32,8 @@ export class StatsAccumulator {
     totalInputTokens: 0,
     totalOutputTokens: 0,
     totalCost: 0,
+    totalPrunedRawChars: 0,
+    totalPrunedSummaryChars: 0,
     callCount: 0,
   };
 
@@ -41,6 +43,12 @@ export class StatsAccumulator {
     this.stats.totalOutputTokens += usage.output ?? 0;
     this.stats.totalCost += usage.cost?.total ?? 0;
     this.stats.callCount += 1;
+  }
+
+  /** Record the raw and summary characters for one accepted prune. */
+  addPrunedChars(rawChars: number, summaryChars: number): void {
+    this.stats.totalPrunedRawChars += rawChars;
+    this.stats.totalPrunedSummaryChars += summaryChars;
   }
 
   /** Return a snapshot of the current cumulative stats. */
@@ -54,6 +62,8 @@ export class StatsAccumulator {
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
+      totalPrunedRawChars: 0,
+      totalPrunedSummaryChars: 0,
       callCount: 0,
     };
   }
@@ -69,6 +79,8 @@ export class StatsAccumulator {
       totalInputTokens: data.totalInputTokens ?? 0,
       totalOutputTokens: data.totalOutputTokens ?? 0,
       totalCost: data.totalCost ?? 0,
+      totalPrunedRawChars: data.totalPrunedRawChars ?? 0,
+      totalPrunedSummaryChars: data.totalPrunedSummaryChars ?? 0,
       callCount: data.callCount ?? 0,
     };
   }
@@ -128,6 +140,20 @@ export function formatCharProgress(receivedChars: number, rawChars?: number): st
 export function formatCost(n: number): string {
   if (n < 0.001 && n > 0) return `<$0.001`;
   return `$${n.toFixed(3)}`;
+}
+
+/** Estimate the input cost avoided by replacing raw output with summaries. */
+export function formatTheoreticalSavings(
+  stats: SummarizerStats,
+  model?: { cost?: { input?: number } },
+): string | null {
+  const savedChars = stats.totalPrunedRawChars - stats.totalPrunedSummaryChars;
+  if (savedChars <= 0) return null;
+
+  const savedTokens = Math.round(savedChars / 4);
+  const inputPricePerMillion = model?.cost?.input;
+  if (typeof inputPricePerMillion !== "number") return "price unavailable";
+  return `~${formatCost((savedTokens * inputPricePerMillion) / 1_000_000)}`;
 }
 
 /**
