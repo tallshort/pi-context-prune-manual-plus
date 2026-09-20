@@ -423,6 +423,15 @@ The extension registers a status widget in the Pi footer that shows the current 
 - Mid-turn pruning now supports completed subsets of a longer tool chain, but batching is still based on assistant-message groups rather than arbitrary semantic task labels.
 - The `/pruner tree` browser shows pruned tool calls grouped under their summaries. Press `Ctrl-O` on a summary node to open the full pruned summary message in a bordered overlay. It still does not recover full original tool outputs inline (use `context_tree_query` for that).
 - Summary grouping across multiple turns (e.g., "compress the last 5 summaries") is a follow-up item.
+## Maintainers
+
+To review and merge upstream changes safely on a dedicated branch, run:
+
+```bash
+./scripts/sync-upstream-wizard.sh
+```
+
+The wizard fetches `championswimmer/pi-context-prune`, creates a `sync/upstream-main-*` branch, asks before merging, runs validation only with your confirmation, and can push/create a PR through `gh`.
 
 ## Follow-up ideas
 
