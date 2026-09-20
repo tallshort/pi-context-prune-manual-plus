@@ -1,19 +1,58 @@
-# pi-context-prune
+# @tallshort/pi-context-prune-manual-plus
 
-[![npm version](https://img.shields.io/npm/v/pi-context-prune?style=flat-square)](https://www.npmjs.com/package/pi-context-prune)
-[![npm downloads](https://img.shields.io/npm/dm/pi-context-prune?style=flat-square)](https://www.npmjs.com/package/pi-context-prune)
+[![npm version](https://img.shields.io/npm/v/%40tallshort%2Fpi-context-prune-manual-plus?style=flat-square)](https://www.npmjs.com/package/@tallshort/pi-context-prune-manual-plus)
 
-A [Pi coding-agent](https://github.com/badlogic/pi-mono) extension that **summarizes completed tool-call batches**, prunes raw tool outputs from future LLM context, and exposes a `context_tree_query` escape hatch to recover any original output on demand.
+> **Fork of [championswimmer/pi-context-prune](https://github.com/championswimmer/pi-context-prune)**, maintained by [tallshort](https://github.com/tallshort).
 
-## Check out my other Pi extensions
+A [Pi coding-agent](https://github.com/badlogic/pi-mono) extension that summarizes completed tool-call batches, prunes raw tool outputs from future LLM context, and preserves the originals for on-demand recovery.
 
-- [![pi-auto-theme](https://img.shields.io/badge/🎨_pi--auto--theme-blue?style=flat-square)](https://github.com/championswimmer/pi-auto-theme) — Auto-syncs Pi theme with OS dark/light mode.
-- [![pi-cache-graph](https://img.shields.io/badge/📊_pi--cache--graph-orange?style=flat-square)](https://github.com/championswimmer/pi-cache-graph) — Real-time prompt cache hit rates and token metrics.
-- [![pi-checklist](https://img.shields.io/badge/✅_pi--checklist-teal?style=flat-square)](https://github.com/championswimmer/pi-checklist) — Session task checklist with dependencies and a TUI renderer.
-- [![pi-context-prune](https://img.shields.io/badge/✂️_pi--context--prune-green?style=flat-square)](https://github.com/championswimmer/pi-context-prune) — Prunes verbose tool outputs from context while preserving history.
-- [![pi-context-usage](https://img.shields.io/badge/🪟_pi--context--usage-purple?style=flat-square)](https://github.com/championswimmer/pi-context-usage) — Dot-grid visualization of context window token usage.
-- [![pi-speedometer](https://img.shields.io/badge/⚡_pi--speedometer-yellow?style=flat-square)](https://github.com/championswimmer/pi-speedometer) — Live tokens/sec and TTFT in the status bar.
-- [![pi-subscription-meter](https://img.shields.io/badge/💳_pi--subscription--meter-red?style=flat-square)](https://github.com/championswimmer/pi-subscription-meter) — Tracks subscription quotas and rate limits across AI providers.
+## What this fork adds
+
+The primary enhancement is safe, observable **manual on-demand pruning** through `/pruner now`, so you decide exactly when context is rewritten.
+
+### Manual `/pruner now` enhancements
+
+- **Preview first:** `/pruner dry-run` reports pending batches, threshold skips, and an estimated saving without provider calls or session changes.
+- **See each batch:** a centered live overlay reports per-batch progress, received summary characters, retries, and a sanitized terminal failure reason.
+
+#### Example manual progress overlay
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Pruner Now (4/47 complete · 8 running)                                       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ⚠ Batch 1/47 · 1 tool call · skipped                                         │
+│ ⠋ Batch 2/47 · 4 tool calls · 133 summary chars / 31.2k raw chars            │
+│ ⚠ Batch 3/47 · 1 tool call · skipped                                         │
+│ ⠋ Batch 4/47 · 1 tool call · 133 summary chars / 3.3k raw chars              │
+│ ⠋ Batch 5/47 · 1 tool call · 140 summary chars / 1.0k raw chars              │
+│ ⠋ Batch 6/47 · 1 tool call · 68 summary chars / 930 raw chars                │
+│ ⠋ Batch 7/47 · 1 tool call · 22 summary chars / 5.1k raw chars               │
+│ ⠋ Batch 8/47 · 1 tool call                                                   │
+│ ⚠ Batch 9/47 · 1 tool call · skipped                                         │
+│ ⚠ Batch 10/47 · 1 tool call · skipped                                        │
+│ ⠋ Batch 11/47 · 1 tool call                                                  │
+│ ⠋ Batch 12/47 · 1 tool call                                                  │
+│ ○ Batch 13/47 · 1 tool call · pending                                        │
+│ ○ Batch 14/47 · 1 tool call · pending                                        │
+│ ○ Batch 15/47 · 1 tool call · pending                                        │
+│ ○ Batch 16/47 · 1 tool call · pending                                        │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Esc: stop scheduling new batches; in-flight batches will finish              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Control throughput:** configure 1–16 simultaneous summary calls instead of using an unbounded automatic fan-out.
+- **Stop safely:** `Esc` stops scheduling new batches while in-flight work finishes; completed results remain available for settlement.
+- **Handle transient failures:** eligible provider failures retry once. When an earlier batch fails, later successful summaries are reused in the same process instead of calling the provider again.
+- **Respect provider limits:** a shared 5–60-second rate-limit cooldown blocks new provider requests across every trigger while preserving pending batches.
+
+This fork also adds:
+
+- minimum raw-character thresholding, cumulative statistics, and detailed normalized failure reporting;
+- stable prune-frontier handling across compaction and recovery.
+
+The upstream project remains the foundation; [PRUNING.md](PRUNING.md) is retained as its original algorithm and research-background document. See the original repository for its history and general pruning design.
 
 ---
 
@@ -35,14 +74,14 @@ The extension does append its own custom summary/index/frontier/stats entries to
 
 ### Install from npm (stable releases)
 
-The package is published on [npmjs.org](https://www.npmjs.com/package/pi-context-prune). Use this for stable, versioned releases:
+The fork is published on [npmjs.org](https://www.npmjs.com/package/@tallshort/pi-context-prune-manual-plus). Use this for stable, versioned releases:
 
 ```bash
 # Install globally (all projects)
-pi install npm:pi-context-prune
+pi install npm:@tallshort/pi-context-prune-manual-plus
 
 # Or install for the current project only
-pi install -l npm:pi-context-prune
+pi install -l npm:@tallshort/pi-context-prune-manual-plus
 ```
 
 Once installed, the extension is auto-loaded every time you run `pi`. No flags needed.
@@ -55,28 +94,26 @@ If you want the latest unreleased changes from `main`, install directly from the
 
 ```bash
 # Install globally (all projects)
-pi install git:github.com/championswimmer/pi-context-prune
+pi install git:github.com/tallshort/pi-context-prune
 
 # Or install for the current project only
-pi install -l git:github.com/championswimmer/pi-context-prune
+pi install -l git:github.com/tallshort/pi-context-prune
 ```
-
 > **Note:** The `main` branch may contain unreleased or experimental changes. Prefer the npm install for day-to-day use.
 
 ### Try without installing
 
 ```bash
 # Load for this session only (no install)
-pi -e npm:pi-context-prune
+pi -e npm:@tallshort/pi-context-prune-manual-plus
 
 # Or try the latest from git without installing
-pi -e git:github.com/championswimmer/pi-context-prune
+pi -e git:github.com/tallshort/pi-context-prune
 ```
-
 ### From source (development)
 
 ```bash
-git clone https://github.com/championswimmer/pi-context-prune
+git clone https://github.com/tallshort/pi-context-prune
 cd pi-context-prune
 pi -e .
 ```
@@ -84,8 +121,8 @@ pi -e .
 ### Manage installed extensions
 
 ```bash
-pi list           # show installed packages
-pi remove pi-context-prune
+pi list                      # show installed packages
+pi remove @tallshort/pi-context-prune-manual-plus
 ```
 
 ## Prune-On Modes

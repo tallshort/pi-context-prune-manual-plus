@@ -1,7 +1,7 @@
 {
-  "name": "pi-context-prune",
-  "version": "1.4.0",
-  "description": "Pi extension package for pruning future context while preserving original tool-call history.",
+  "name": "@tallshort/pi-context-prune-manual-plus",
+  "version": "1.5.0",
+  "description": "Pi extension fork with manual on-demand context pruning and safe recovery enhancements.",
   "type": "module",
   "main": "./dist/index.js",
   "exports": "./dist/index.js",
@@ -22,13 +22,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/championswimmer/pi-context-prune.git"
+    "url": "git+https://github.com/tallshort/pi-context-prune.git"
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/championswimmer/pi-context-prune/issues"
+    "url": "https://github.com/tallshort/pi-context-prune/issues"
   },
-  "homepage": "https://github.com/championswimmer/pi-context-prune#readme",
+  "homepage": "https://github.com/tallshort/pi-context-prune#readme",
   "pi": {
     "extensions": [
       "./dist/index.js"

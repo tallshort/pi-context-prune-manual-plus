@@ -2,6 +2,8 @@
 
 This document defines stable internal behavior and invariants for the context-pruning system. It does not define user commands, defaults, or TUI presentation; those belong in [README.md](README.md).
 
+[PRUNING.md](PRUNING.md) is retained from the upstream project as an algorithm and research-background reference. When it differs from this document, this specification is authoritative for the fork's current runtime behavior.
+
 ## 1. Purpose and boundary
 
 Context pruning reduces the messages sent in future model context while retaining enough information to recover any removed tool result.

@@ -19,8 +19,8 @@ if (!VALID_RELEASE_TYPES.has(releaseType)) {
 }
 
 const packageName = readPackageName();
-if (packageName !== "pi-context-prune") {
-  fail(`This release script is only intended for the pi-context-prune package. Found package name: ${packageName}`);
+if (packageName !== "@tallshort/pi-context-prune-manual-plus") {
+  fail(`This release script is only intended for the @tallshort/pi-context-prune-manual-plus package. Found package name: ${packageName}`);
 }
 
 const previousVersion = readPackageVersion();
