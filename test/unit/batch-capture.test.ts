@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captureUnindexedBatchesFromSession } from "../src/batch-capture.js";
+import { captureUnindexedBatchesFromSession } from "../../src/batch-capture.js";
 
 const unsummarizedIndexer = { isSummarized: () => false };
 

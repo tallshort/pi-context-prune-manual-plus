@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded } from "../src/manual-prune-scheduler.js";
+import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded } from "../../src/manual-prune-scheduler.js";
 
 describe("manual prune cancellation", () => {
   it("recognizes only Pi's configured cancel key", () => {

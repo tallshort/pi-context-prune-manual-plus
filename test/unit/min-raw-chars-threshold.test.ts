@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldSkipMinRawCharsThreshold } from "../src/min-raw-chars-threshold.js";
+import { shouldSkipMinRawCharsThreshold } from "../../src/min-raw-chars-threshold.js";
 
 describe("shouldSkipMinRawCharsThreshold", () => {
   it("does not skip when the threshold is 0", () => {

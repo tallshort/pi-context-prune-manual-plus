@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planFlushSettlement } from "../src/flush-settlement.js";
+import { planFlushSettlement } from "../../src/flush-settlement.js";
 
 describe("planFlushSettlement", () => {
   it("settles a normal partial failure through the first failed batch", () => {
