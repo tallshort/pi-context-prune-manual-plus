@@ -8,16 +8,22 @@ This repository is for a Pi coding-agent extension that prunes tool-call trees b
 - Preserve user work; do not overwrite unrelated changes.
 - Prefer Markdown for plans and notes, and keep code and docs aligned.
 
-## Planning
-- Use the `planning` skill for any multi-step task.
-- Store plans in `.agents/plans/`.
-- Use zero-padded numbered plan filenames like `000-first-plan.md`, `001-another-plan.md`, and `002-plan-more.md`.
-- Keep plan checklists in sync with actual progress.
+## Planning and backlog
+- Use the `planning` skill for a discrete feature that spans design, implementation, and verification, or whenever the user explicitly asks for a plan.
+- Create one zero-padded plan in `.agents/plans/` per feature. Keep using that plan for follow-up fixes and refinements of the same feature; update its checklist as work progresses.
+- Do not create a separate plan for a focused fix, a commit, or a `TODO.md` update unless it starts a new feature.
+- `TODO.md` is the committed backlog for future work. Add or reprioritize ideas there without creating a plan; create a feature plan only when implementing an item.
 
+## Build and tests
+- Run `npm test` for unit tests. New behavior fixes need a regression test when there is a suitable seam.
+- Run `npm run build` after extension source changes; it regenerates the ignored local `dist/` bundle used by Pi.
+- Run `npm run check` before release/package validation.
+- Keep `dist/` untracked; commit TypeScript source, tests, docs, and plans instead.
 ## Implementation
+- Keep changes small, focused, and reversible.
+- Read existing files before editing them and preserve unrelated user work.
 - When adding code, include a brief explanation of why the change exists.
-- Add tests or a reproducible verification command for behavior changes when possible.
-
+- Keep source, tests, and user-facing documentation aligned.
 ---
 
 ## Code Structure
