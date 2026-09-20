@@ -1,11 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { isManualPruneCancelInput, runAbortableBounded } from "../src/manual-prune-scheduler.js";
+import { formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded } from "../src/manual-prune-scheduler.js";
 
 describe("manual prune cancellation", () => {
   it("recognizes only Pi's configured cancel key", () => {
     expect(isManualPruneCancelInput("q", () => false)).toBe(false);
     expect(isManualPruneCancelInput("pi-cancel", (data) => data === "pi-cancel")).toBe(true);
     expect(isManualPruneCancelInput("x", () => false)).toBe(false);
+  });
+
+  it("reports completed batches so the overlay title advances", () => {
+    const initial = [...Array<"running">(8).fill("running"), ...Array<"pending">(153).fill("pending")];
+    const afterOneCompletes = ["done" as const, ...initial.slice(1)];
+
+    expect(formatManualPruneProgressStatus(initial)).toBe("0/161 complete · 8 running");
+    expect(formatManualPruneProgressStatus(afterOneCompletes)).toBe("1/161 complete · 7 running");
   });
 
   it("does not schedule batch nine or later after cancellation", async () => {

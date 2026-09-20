@@ -24,6 +24,7 @@ This repository is a Pi coding-agent extension that prunes tool-call trees befor
 ## Documentation boundaries
 - `README.md` is the source of truth for user-facing commands, settings, defaults, and TUI behavior.
 - `AGENTS.md` contains agent workflow rules and stable source navigation only; do not duplicate volatile user-facing behavior here.
+- `SPEC.md` is the source of truth for cross-module invariants and lifecycle contracts; read it before changing core capture, flush, frontier, indexing, or recovery behavior.
 
 ## Code map
 - `index.ts` wires capture, flushing, indexing, session persistence, and Pi events.

@@ -276,6 +276,8 @@ Or directly in `~/.pi/agent/context-prune/settings.json`:
 
 ## Architecture
 
+For stable internal lifecycle contracts and invariants, see [SPEC.md](SPEC.md).
+
 ```
 index.ts                    — TypeScript source entry point, wires events + modules
 dist/index.js               — generated ESM bundle shipped in the npm package

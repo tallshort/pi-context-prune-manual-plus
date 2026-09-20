@@ -11,10 +11,12 @@ steps:
       - "- [x] step 2: render a centered focusable overlay with up to sixteen rows and themed status output"
       - "- [x] step 3: softly cancel scheduling while preserving completed in-flight results"
       - "- [x] step 4: use Pi's configured cancel key and status-bearing overlay title"
+      - "- [x] step 5: report completed-batch progress rather than a fixed worker count"
   - phase: validation
     steps:
       - "- [x] step 1: add regression tests for cancel-key recognition and post-abort scheduling"
       - "- [x] step 2: run unit tests and rebuild the ignored bundle"
+      - "- [x] step 3: cover dynamic completed-batch title progress"
 ---
 
 # 046-manual-prune-progress
@@ -27,7 +29,9 @@ steps:
 - [x] step 2: render a centered focusable overlay with up to sixteen rows and themed status output
 - [x] step 3: softly cancel scheduling while preserving completed in-flight results
 - [x] step 4: use Pi's configured cancel key and status-bearing overlay title
+- [x] step 5: report completed-batch progress rather than a fixed worker count
 
 ## Phase 3 — Validation
 - [x] step 1: add regression tests for cancel-key recognition and post-abort scheduling
 - [x] step 2: run unit tests and rebuild the ignored bundle
+- [x] step 3: cover dynamic completed-batch title progress

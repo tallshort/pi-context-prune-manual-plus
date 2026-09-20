@@ -6,6 +6,15 @@ export function isManualPruneCancelInput(
   return matchesCancel(data);
 }
 
+export type ManualPruneProgressState = "pending" | "running" | "done" | "skipped";
+
+/** Formats the dynamic portion of the manual-prune overlay title. */
+export function formatManualPruneProgressStatus(states: readonly ManualPruneProgressState[]): string {
+  const completed = states.filter((state) => state === "done" || state === "skipped").length;
+  const running = states.filter((state) => state === "running").length;
+  return `${completed}/${states.length} complete · ${running} running`;
+}
+
 /**
  * Runs work with bounded concurrency. Once the signal is aborted it lets active
  * work finish, but never dispatches another item; undispatched slots are null.

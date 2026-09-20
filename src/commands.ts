@@ -16,7 +16,7 @@ import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-a
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
-import { isManualPruneCancelInput } from "./manual-prune-scheduler.js";
+import { formatManualPruneProgressStatus, isManualPruneCancelInput } from "./manual-prune-scheduler.js";
 
 /**
  * Wraps a SettingsList with a border + title, delegating all input handling
@@ -346,13 +346,13 @@ class PruneProgressOverlay extends Container implements Focusable {
     const runningIndex = this.rows.findIndex((row) => row.status === "running");
     const windowEnd = runningIndex < 0 ? this.rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
     const visibleRows = this.rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
-    const runningRows = this.rows.filter((row) => row.status === "running").length;
+    const progressStatus = formatManualPruneProgressStatus(this.rows.map((row) => row.status));
     const title = this.cancelling
-      ? `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("warning", " (Cancelling)")}`
-      : `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("dim", ` (Running ${runningRows}/${this.rows.length})`)}`;
+      ? `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("warning", ` (Cancelling · ${progressStatus})`)}`
+      : `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("dim", ` (${progressStatus})`)}`;
     const hint = this.cancelling
       ? this.theme.fg("dim", "Waiting for already-started batches to finish…")
-      : this.theme.fg("dim", "Esc: stop scheduling new batches (active batches finish)");
+      : this.theme.fg("dim", "Esc: stop scheduling new batches; in-flight batches will finish");
     const border = this.theme.fg("border", `┌${"─".repeat(innerWidth)}┐`);
     const divider = this.theme.fg("border", `├${"─".repeat(innerWidth)}┤`);
     const bottom = this.theme.fg("border", `└${"─".repeat(innerWidth)}┘`);
