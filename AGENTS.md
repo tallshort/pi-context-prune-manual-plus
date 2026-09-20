@@ -9,10 +9,10 @@ This repository is for a Pi coding-agent extension that prunes tool-call trees b
 - Prefer Markdown for plans and notes, and keep code and docs aligned.
 
 ## Planning and backlog
-- Use the `planning` skill for a discrete feature that spans design, implementation, and verification, or whenever the user explicitly asks for a plan.
-- Create one zero-padded plan in `.agents/plans/` per feature. Keep using that plan for follow-up fixes and refinements of the same feature; update its checklist as work progresses.
-- Do not create a separate plan for a focused fix, a commit, or a `TODO.md` update unless it starts a new feature.
-- `TODO.md` is the committed backlog for future work. Add or reprioritize ideas there without creating a plan; create a feature plan only when implementing an item.
+- Use the `planning` skill for a discrete feature that spans design, implementation, and verification, or whenever the user explicitly asks for a plan. The skill is the source of truth for plan format, filenames, and checklist maintenance.
+- Keep one active plan per feature; record related fixes and refinements in that plan rather than opening another.
+- Focused fixes, commits, and `TODO.md` updates do not need a plan unless they start a new feature.
+- `TODO.md` is the committed backlog for future work. Add or reprioritize ideas there; open a feature plan only when implementation begins.
 
 ## Build and tests
 - Run `npm test` for unit tests. New behavior fixes need a regression test when there is a suitable seam.
