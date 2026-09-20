@@ -216,7 +216,7 @@ Usage:
   /pruner min-raw-chars <n>               Skip batches with at most n raw result characters (0 disables)
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
-  /pruner now                              Flush pending tool calls immediately (Esc/q stops scheduling new batches; running ones finish and are retained)
+  /pruner now                              Flush pending tool calls immediately (Esc stops scheduling new batches; running ones finish and are retained)
   /pruner help                             Show this help
 
 Agentic-auto reminder:
@@ -346,10 +346,13 @@ class PruneProgressOverlay extends Container implements Focusable {
     const runningIndex = this.rows.findIndex((row) => row.status === "running");
     const windowEnd = runningIndex < 0 ? this.rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
     const visibleRows = this.rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
-    const title = this.cancelling ? this.theme.fg("warning", "Pruner cancelling") : this.theme.fg("accent", "Pruner now");
+    const runningRows = this.rows.filter((row) => row.status === "running").length;
+    const title = this.cancelling
+      ? `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("warning", " (Cancelling)")}`
+      : `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("dim", ` (Running ${runningRows}/${this.rows.length})`)}`;
     const hint = this.cancelling
       ? this.theme.fg("dim", "Waiting for already-started batches to finish…")
-      : this.theme.fg("dim", "Esc / q: stop scheduling new batches (active batches finish)");
+      : this.theme.fg("dim", "Esc: stop scheduling new batches (active batches finish)");
     const border = this.theme.fg("border", `┌${"─".repeat(innerWidth)}┐`);
     const divider = this.theme.fg("border", `├${"─".repeat(innerWidth)}┤`);
     const bottom = this.theme.fg("border", `└${"─".repeat(innerWidth)}┘`);
@@ -790,7 +793,7 @@ export function registerCommands(
           }
 
           // A centered overlay owns focus for the duration of manual pruning.
-          // It displays up to sixteen rows and uses Esc/q for a soft stop.
+          // It displays up to sixteen rows and uses Esc for a soft stop.
           const controller = new AbortController();
           let closeProgressOverlay: (() => void) | undefined;
           let progressOverlay: PruneProgressOverlay | undefined;

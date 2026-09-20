@@ -1,9 +1,9 @@
-/** Returns true for q or Pi's configured selection-cancel input. */
+/** Returns true only for Pi's configured selection-cancel input. */
 export function isManualPruneCancelInput(
   data: string,
   matchesCancel: (data: string) => boolean,
 ): boolean {
-  return data === "q" || matchesCancel(data);
+  return matchesCancel(data);
 }
 
 /**

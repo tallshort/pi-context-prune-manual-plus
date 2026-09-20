@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { isManualPruneCancelInput, runAbortableBounded } from "../src/manual-prune-scheduler.js";
 
 describe("manual prune cancellation", () => {
-  it("recognizes q and Pi's configured cancel key", () => {
-    expect(isManualPruneCancelInput("q", () => false)).toBe(true);
+  it("recognizes only Pi's configured cancel key", () => {
+    expect(isManualPruneCancelInput("q", () => false)).toBe(false);
     expect(isManualPruneCancelInput("pi-cancel", (data) => data === "pi-cancel")).toBe(true);
     expect(isManualPruneCancelInput("x", () => false)).toBe(false);
   });
