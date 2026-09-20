@@ -334,11 +334,11 @@ class PruneProgressOverlay extends Container implements Focusable {
     if (row.status === "running") {
       const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
       const chars = row.receivedChars > 0 ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}` : "";
-      return `${this.theme.fg("accent", frame)}${this.theme.fg("dim", ` ${row.label} · ${count}${chars}`)}`;
+      return `${this.theme.fg("accent", frame)}${this.theme.fg("text", ` ${row.label} · ${count}${chars}`)}`;
     }
-    if (row.status === "done") return `${this.theme.fg("success", "✓")}${this.theme.fg("dim", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
-    if (row.status === "skipped") return this.theme.fg("dim", `⚠ ${row.label} · ${count} · skipped`);
-    return this.theme.fg("dim", `○ ${row.label} · ${count} · pending`);
+    if (row.status === "done") return `${this.theme.fg("success", "✓")}${this.theme.fg("text", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
+    if (row.status === "skipped") return this.theme.fg("text", `⚠ ${row.label} · ${count} · skipped`);
+    return this.theme.fg("text", `○ ${row.label} · ${count} · pending`);
   }
 
   override render(width: number): string[] {
