@@ -14,6 +14,7 @@ Future improvements that preserve the core context-pruning algorithm.
 - [ ] Show queue totals (batch count, tool-call count, and raw characters) in the manual-prune overlay and status output.
 - [ ] Improve savings reporting with compression ratio and raw/summary character totals alongside the current cost estimate.
 - [ ] Add index maintenance commands: export, clear, and filter pruned records by turn or tool name.
+- [x] Deliver a focusable `/pruner now` overlay with concurrent batch progress, soft cancellation, and automatic close after processing (manually verified by the user).
 
 ## Test coverage
 

@@ -12,9 +12,8 @@ This repository is a Pi coding-agent extension that prunes tool-call trees befor
 - Use the `planning` skill for a discrete feature that spans design, implementation, and verification, or whenever the user explicitly asks for a plan. The skill is the source of truth for plan format, filenames, and checklist maintenance.
 - Keep one active plan per feature; record related fixes and refinements in that plan rather than opening another.
 - Focused fixes, commits, and `TODO.md` updates do not need a plan unless they start a new feature.
-- `TODO.md` is the committed backlog for future work. Add or reprioritize ideas there; open a feature plan only when implementation begins.
-- `TODO.md` is a checkbox backlog. When an existing item is implemented and the user has manually verified its behavior, change it from `[ ]` to `[x]`; implementation and automated checks alone keep it open.
-- Do not add completed work retroactively to `TODO.md`; use feature plans and Git history for that record.
+- `TODO.md` is the committed feature backlog and checkbox ledger. Add a `[ ]` item when a discrete user-visible feature begins; focused fixes, commits, and documentation-only work can omit it.
+- When that item is implemented and the user has manually verified its behavior, change it from `[ ]` to `[x]`; implementation and automated checks alone keep it open. Keep it in its existing category as the feature record.
 
 ## Build and tests
 - Run `npm test` for unit tests. New behavior fixes need a regression test when there is a suitable seam.
