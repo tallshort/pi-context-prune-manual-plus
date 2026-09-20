@@ -4,7 +4,7 @@ Future improvements that preserve the core context-pruning algorithm.
 
 ## Reliability and controls
 
-- [ ] Make `/pruner now` concurrency configurable.
+- [x] Make `/pruner now` concurrency configurable (manually verified by the user).
 - [ ] Add provider-limit backoff and automatic throttling after retryable failures.
 - [x] Add one automatic retry for retryable `/pruner now` summarizer/provider failures, with per-batch failure visibility and cumulative retry/failure statistics (manually verified by the user).
 - [x] Add a dry-run/debug mode that reports candidate batches and estimated savings without writing summaries or advancing the frontier (manually verified by the user).

@@ -8,6 +8,8 @@ import {
   BATCHING_MODES,
   STATUS_WIDGET_ID,
   SUMMARIZER_THINKING_LEVELS,
+  MANUAL_PRUNE_CONCURRENCY_MIN,
+  MANUAL_PRUNE_CONCURRENCY_MAX,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig } from "./config.js";
@@ -88,6 +90,7 @@ const SUBCOMMANDS = [
   { value: "dry-run", label: "dry-run   — preview pending work without changing session state" },
   { value: "now",     label: "now       — flush pending tool calls with a focusable progress overlay" },
   { value: "min-raw-chars", label: "min-raw-chars — show or set the raw-character skip threshold" },
+  { value: "manual-concurrency", label: "manual-concurrency — show or set `/pruner now` concurrency (1–16)" },
   { value: "help",    label: "help      — show this help" },
 ] as const;
 
@@ -123,6 +126,7 @@ function summarizerThinkingDescription(level: ContextPruneConfig["summarizerThin
   return `Request ${level} thinking/reasoning for summarizer calls where supported.`;
 }
 const RAW_CHAR_THRESHOLD_PRESETS = [0, 300, 600, 1200, 2400, 4800] as const;
+const MANUAL_PRUNE_CONCURRENCY_PRESETS = [1, 2, 4, 8, 12, 16] as const;
 
 function rawCharThresholdDescription(value: number): string {
   return value === 0
@@ -133,6 +137,17 @@ function rawCharThresholdDescription(value: number): string {
 function parseMinRawCharsThreshold(value: string): number | null {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function manualPruneConcurrencyDescription(value: number): string {
+  return `Start up to ${value} simultaneous summarizer calls for /pruner now (allowed: ${MANUAL_PRUNE_CONCURRENCY_MIN}–${MANUAL_PRUNE_CONCURRENCY_MAX}).`;
+}
+
+function parseManualPruneConcurrency(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= MANUAL_PRUNE_CONCURRENCY_MIN && parsed <= MANUAL_PRUNE_CONCURRENCY_MAX
+    ? parsed
+    : null;
 }
 
 function parseModelAndThinkingArg(
@@ -217,6 +232,8 @@ Usage:
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
   /pruner min-raw-chars                   Show the raw-character skip threshold
   /pruner min-raw-chars <n>               Skip batches with at most n raw result characters (0 disables)
+  /pruner manual-concurrency              Show /pruner now concurrency
+  /pruner manual-concurrency <1-16>       Set simultaneous /pruner now summary calls
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
   /pruner dry-run                          Preview pending candidates and historical savings estimate without changing session state
@@ -426,6 +443,9 @@ export function registerCommands(
           const thresholdValues = [...new Set([...RAW_CHAR_THRESHOLD_PRESETS, config.minRawCharsThreshold])]
             .sort((a, b) => a - b)
             .map(String);
+          const concurrencyValues = [...new Set([...MANUAL_PRUNE_CONCURRENCY_PRESETS, config.manualPruneConcurrency])]
+            .sort((a, b) => a - b)
+            .map(String);
           const items: SettingItem[] = [
             {
               id: "enabled",
@@ -519,6 +539,13 @@ export function registerCommands(
               currentValue: config.batchingMode,
               description: batchingModeDescription(config.batchingMode),
             },
+            {
+              id: "manualPruneConcurrency",
+              label: "Manual concurrency",
+              values: concurrencyValues,
+              currentValue: String(config.manualPruneConcurrency),
+              description: manualPruneConcurrencyDescription(config.manualPruneConcurrency),
+            },
           ];
 
           let settingsList: SettingsList;
@@ -580,6 +607,12 @@ export function registerCommands(
               if (batchingItem) {
                 batchingItem.description = batchingModeDescription(newConfig.batchingMode);
               }
+            } else if (id === "manualPruneConcurrency") {
+              const concurrency = parseManualPruneConcurrency(newValue);
+              if (concurrency === null) return;
+              newConfig.manualPruneConcurrency = concurrency;
+              const concurrencyItem = items.find((item) => item.id === "manualPruneConcurrency");
+              if (concurrencyItem) concurrencyItem.description = manualPruneConcurrencyDescription(concurrency);
             }
             currentConfig.value = newConfig;
             saveConfig(newConfig);
@@ -644,7 +677,7 @@ export function registerCommands(
             ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
             : "\n  (no summarizer calls yet)";
           ctx.ui.notify(
-            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min chars: ${cfg.minRawCharsThreshold.toLocaleString()} (${cfg.minRawCharsThreshold === 0 ? "off" : "skip at or below"})\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
+            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min chars: ${cfg.minRawCharsThreshold.toLocaleString()} (${cfg.minRawCharsThreshold === 0 ? "off" : "skip at or below"})\n  concurrency: ${cfg.manualPruneConcurrency} (/pruner now)\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
           );
           break;
         }
@@ -774,6 +807,27 @@ export function registerCommands(
           }
           saveConfig(currentConfig.value);
           ctx.ui.notify(`Batching mode set to: ${batchingModeLabel(currentConfig.value.batchingMode)}`);
+          break;
+        }
+
+        // ── /pruner manual-concurrency [n] ──
+        case "manual-concurrency": {
+          const concurrencyArg = subArgs[0];
+          if (!concurrencyArg) {
+            ctx.ui.notify(
+              `Manual prune concurrency: ${currentConfig.value.manualPruneConcurrency}\n${manualPruneConcurrencyDescription(currentConfig.value.manualPruneConcurrency)}`,
+              "info",
+            );
+            break;
+          }
+          const concurrency = parseManualPruneConcurrency(concurrencyArg);
+          if (concurrency === null) {
+            ctx.ui.notify(`Invalid concurrency: ${concurrencyArg}. Use an integer from ${MANUAL_PRUNE_CONCURRENCY_MIN} to ${MANUAL_PRUNE_CONCURRENCY_MAX}.`, "error");
+            break;
+          }
+          currentConfig.value = { ...currentConfig.value, manualPruneConcurrency: concurrency };
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(`Manual prune concurrency set to: ${concurrency}`);
           break;
         }
 

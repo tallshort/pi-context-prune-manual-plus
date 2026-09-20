@@ -215,7 +215,7 @@ export default function (pi: ExtensionAPI) {
       if (options.onProgress) {
         results = await runAbortableBounded(
           batches,
-          8,
+          currentConfig.value.manualPruneConcurrency,
           options.signal,
           async (batch, index) => {
             if (isSmallBatch(batch)) {

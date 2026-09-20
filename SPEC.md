@@ -69,7 +69,7 @@ Index records, summaries, frontier snapshots, and statistics are persisted as se
 
 ## 7. Manual-prune cancellation
 
-Manual pruning uses bounded scheduling with soft cancellation:
+Manual pruning uses configured bounded scheduling (default 8, validated range 1–16) with soft cancellation:
 
 - cancellation prevents dispatch of additional batches;
 - already-started summary calls finish;

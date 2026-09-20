@@ -193,7 +193,13 @@ export interface ContextPruneConfig {
   batchingMode: BatchingMode;
   /** Skip summary calls when a batch has at most this many raw result characters; 0 disables the threshold. */
   minRawCharsThreshold: number;
+  /** Maximum simultaneous summarizer calls started by `/pruner now` (1–16). */
+  manualPruneConcurrency: number;
 }
+
+export const MANUAL_PRUNE_CONCURRENCY_MIN = 1;
+export const MANUAL_PRUNE_CONCURRENCY_MAX = 16;
+export const DEFAULT_MANUAL_PRUNE_CONCURRENCY = 8;
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
   enabled: false,
@@ -206,6 +212,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   notifySkipped: true,
   batchingMode: "turn",
   minRawCharsThreshold: 0,
+  manualPruneConcurrency: DEFAULT_MANUAL_PRUNE_CONCURRENCY,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────

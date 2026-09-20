@@ -2,7 +2,8 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { ContextPruneConfig, PruneOn, SummarizerThinking } from "./types.js";
-import { DEFAULT_CONFIG, PRUNE_ON_MODES, SUMMARIZER_THINKING_LEVELS } from "./types.js";
+import { DEFAULT_CONFIG, DEFAULT_MANUAL_PRUNE_CONCURRENCY, MANUAL_PRUNE_CONCURRENCY_MAX, MANUAL_PRUNE_CONCURRENCY_MIN, PRUNE_ON_MODES, SUMMARIZER_THINKING_LEVELS } from "./types.js";
+export { DEFAULT_MANUAL_PRUNE_CONCURRENCY } from "./types.js";
 
 /** Path to the extension's own settings file, independent of any project. */
 export const SETTINGS_PATH = join(homedir(), ".pi", "agent", "context-prune", "settings.json");
@@ -21,6 +22,13 @@ function normalizeMinRawCharsThreshold(value: unknown): number {
     : DEFAULT_CONFIG.minRawCharsThreshold;
 }
 
+export function normalizeManualPruneConcurrency(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    && Math.floor(value) >= MANUAL_PRUNE_CONCURRENCY_MIN
+    && Math.floor(value) <= MANUAL_PRUNE_CONCURRENCY_MAX
+    ? Math.floor(value)
+    : DEFAULT_MANUAL_PRUNE_CONCURRENCY;
+}
 /** Reads ~/.pi/agent/context-prune/settings.json and returns the config (or defaults). */
 export async function loadConfig(): Promise<ContextPruneConfig> {
   try {
@@ -49,6 +57,7 @@ export async function loadConfig(): Promise<ContextPruneConfig> {
       notifySkipped:
         typeof merged.notifySkipped === "boolean" ? merged.notifySkipped : DEFAULT_CONFIG.notifySkipped,
       minRawCharsThreshold: normalizeMinRawCharsThreshold(merged.minRawCharsThreshold),
+      manualPruneConcurrency: normalizeManualPruneConcurrency(merged.manualPruneConcurrency),
     };
   } catch {
     return { ...DEFAULT_CONFIG };
