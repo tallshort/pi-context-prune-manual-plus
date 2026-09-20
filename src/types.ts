@@ -191,6 +191,8 @@ export interface ContextPruneConfig {
    *                     (all turns between two user messages are merged)
    */
   batchingMode: BatchingMode;
+  /** Skip summary calls when a batch has at most this many raw result characters; 0 disables the threshold. */
+  minRawCharsThreshold: number;
 }
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
@@ -203,6 +205,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   remindUnprunedCount: true,
   notifySkipped: true,
   batchingMode: "turn",
+  minRawCharsThreshold: 0,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────

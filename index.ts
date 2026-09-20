@@ -197,8 +197,10 @@ export default function (pi: ExtensionAPI) {
       const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
         options.onBatchTextProgress?.(index, total, batch, receivedChars);
       };
-      const isSmallBatch = (batch: CapturedBatch) =>
-        batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0) <= 600;
+      const isSmallBatch = (batch: CapturedBatch) => {
+        const threshold = currentConfig.value.minRawCharsThreshold;
+        return threshold > 0 && batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0) <= threshold;
+      };
       type BatchResult = SummarizeResult | { skippedSmall: true } | null;
 
       // `/pruner now` reports individual row state. Limit its concurrent calls so the

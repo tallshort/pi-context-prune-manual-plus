@@ -15,6 +15,12 @@ function isSummarizerThinking(value: unknown): value is SummarizerThinking {
   return typeof value === "string" && SUMMARIZER_THINKING_LEVELS.some((level) => level.value === value);
 }
 
+function normalizeMinRawCharsThreshold(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : DEFAULT_CONFIG.minRawCharsThreshold;
+}
+
 /** Reads ~/.pi/agent/context-prune/settings.json and returns the config (or defaults). */
 export async function loadConfig(): Promise<ContextPruneConfig> {
   try {
@@ -42,6 +48,7 @@ export async function loadConfig(): Promise<ContextPruneConfig> {
           : DEFAULT_CONFIG.remindUnprunedCount,
       notifySkipped:
         typeof merged.notifySkipped === "boolean" ? merged.notifySkipped : DEFAULT_CONFIG.notifySkipped,
+      minRawCharsThreshold: normalizeMinRawCharsThreshold(merged.minRawCharsThreshold),
     };
   } catch {
     return { ...DEFAULT_CONFIG };

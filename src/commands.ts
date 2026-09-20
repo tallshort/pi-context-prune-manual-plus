@@ -6,13 +6,12 @@ import {
   PRUNE_ON_MODES,
   BATCHING_MODES,
   STATUS_WIDGET_ID,
-  PROGRESS_WIDGET_ID,
   SUMMARIZER_THINKING_LEVELS,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig } from "./config.js";
 import { formatTokens, formatCost, formatCharProgress, formatTheoreticalSavings } from "./stats.js";
-import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
+import { Container, Text, SettingsList, type SettingItem, type Focusable, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
@@ -43,6 +42,7 @@ class SettingsOverlay extends Container {
     this.settingsList.invalidate();
   }
 }
+
 
 // ── Status widget text ──────────────────────────────────────────────────────
 
@@ -82,7 +82,8 @@ const SUBCOMMANDS = [
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
   { value: "tree",    label: "tree      — browse pruned tool calls in a foldable tree" },
-  { value: "now",     label: "now       — flush pending tool calls immediately (widget progress)" },
+  { value: "now",     label: "now       — flush pending tool calls with a focusable progress overlay" },
+  { value: "min-raw-chars", label: "min-raw-chars — show or set the raw-character skip threshold" },
   { value: "help",    label: "help      — show this help" },
 ] as const;
 
@@ -116,6 +117,18 @@ function summarizerThinkingDescription(level: ContextPruneConfig["summarizerThin
     return "Request no summarizer reasoning where the provider adapter supports it; some providers may fall back to their default.";
   }
   return `Request ${level} thinking/reasoning for summarizer calls where supported.`;
+}
+const RAW_CHAR_THRESHOLD_PRESETS = [0, 300, 600, 1200, 2400, 4800] as const;
+
+function rawCharThresholdDescription(value: number): string {
+  return value === 0
+    ? "Disabled: summarize every batch regardless of raw result size."
+    : `Skip batches with ${value.toLocaleString()} or fewer raw result characters (about ${Math.round(value / 4).toLocaleString()} tokens).`;
+}
+
+function parseMinRawCharsThreshold(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function parseModelAndThinkingArg(
@@ -198,6 +211,8 @@ Usage:
   /pruner batching                         Show or interactively pick the batching granularity
   /pruner batching turn                    One summary per assistant turn (default)
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
+  /pruner min-raw-chars                   Show the raw-character skip threshold
+  /pruner min-raw-chars <n>               Skip batches with at most n raw result characters (0 disables)
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
   /pruner now                              Flush pending tool calls immediately (Esc/q stops scheduling new batches; running ones finish and are retained)
@@ -231,11 +246,10 @@ Related:
 
 Settings are saved to ~/.pi/agent/context-prune/settings.json`;
 
-// ── Pruner progress widget ────────────────────────────────────────────────────
+// ── Pruner progress overlay ───────────────────────────────────────────────────
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const SPINNER_INTERVAL_MS = 120;
-const MAX_PROGRESS_ROWS = 10;
 
 type RowStatus = "pending" | "running" | "done" | "skipped";
 
@@ -247,111 +261,100 @@ interface WidgetRow {
   receivedChars: number;
 }
 
-/**
- * Registers a multi-row progress widget above the editor for /pruner now.
- * Returns helpers to update row state and clear the widget when done.
- * Each row shows a spinner, label, tool-call count, and live summary char count.
- */
-function startPrunerWidget(
-  ctx: ExtensionCommandContext,
-  batches: CapturedBatch[],
-): {
-  updateRow: (index: number, status: RowStatus, chars?: number) => void;
-  clearWidget: () => void;
-} {
-  const total = batches.length;
-  const rows: WidgetRow[] = batches.map((b, i) => ({
-    label: `Batch ${i + 1}/${total}`,
-    toolCallCount: b.toolCalls.length,
-    rawChars: b.toolCalls.reduce((sum, tc) => sum + tc.resultText.length, 0),
-    status: "pending",
-    receivedChars: 0,
-  }));
+const MAX_PROGRESS_ROWS = 16;
 
-  // Capture tui reference from the factory so updateRow can call requestRender.
-  let requestRender: (() => void) | undefined;
-  let animationTimer: ReturnType<typeof setInterval> | undefined;
+/** Centered, focusable progress UI for `/pruner now`. */
+class PruneProgressOverlay extends Container implements Focusable {
+  private readonly rows: WidgetRow[];
+  private animationTimer: ReturnType<typeof setInterval> | undefined;
+  private _focused = false;
+  private cancelling = false;
 
-  const hasRunningRows = () => rows.some((row) => row.status === "running");
+  get focused(): boolean { return this._focused; }
+  set focused(value: boolean) { this._focused = value; }
 
-  const stopAnimationLoop = () => {
-    if (!animationTimer) return;
-    clearInterval(animationTimer);
-    animationTimer = undefined;
-  };
+  constructor(
+    private readonly tui: TUI,
+    private readonly theme: any,
+    batches: CapturedBatch[],
+    private readonly onCancel: () => void,
+  ) {
+    super();
+    this.rows = batches.map((batch, index) => ({
+      label: `Batch ${index + 1}/${batches.length}`,
+      toolCallCount: batch.toolCalls.length,
+      rawChars: batch.toolCalls.reduce((sum, toolCall) => sum + toolCall.resultText.length, 0),
+      status: "pending",
+      receivedChars: 0,
+    }));
+  }
 
-  // The widget only re-renders when Pi is asked to draw again. Drive a tiny
-  // timer while any row is running so the spinner advances even before the
-  // summarizer streams its first text chunk.
-  const ensureAnimationLoop = () => {
-    if (animationTimer || !requestRender || !hasRunningRows()) return;
-    animationTimer = setInterval(() => {
-      if (!hasRunningRows()) {
-        stopAnimationLoop();
-        return;
-      }
-      requestRender?.();
-    }, SPINNER_INTERVAL_MS);
-    animationTimer.unref?.();
-  };
+  updateRow(index: number, status: RowStatus, chars?: number): void {
+    const row = this.rows[index];
+    if (!row) return;
+    row.status = status;
+    if (chars !== undefined) row.receivedChars = chars;
+    this.syncAnimation();
+    this.tui.requestRender();
+  }
 
-  const syncAnimationLoop = () => {
-    if (hasRunningRows()) {
-      ensureAnimationLoop();
-    } else {
-      stopAnimationLoop();
+  handleInput(data: string): void {
+    if ((data === "q" || data === "escape" || data === "\x1b") && !this.cancelling) {
+      this.cancelling = true;
+      this.onCancel();
+      this.tui.requestRender();
     }
-    requestRender?.();
-  };
+  }
 
-  ctx.ui.setWidget(
-    PROGRESS_WIDGET_ID,
-    (tui, theme) => {
-      requestRender = () => tui.requestRender();
-      syncAnimationLoop();
-      return {
-        invalidate() {},
-        render(_width: number): string[] {
-          const runningIndex = rows.findIndex((row) => row.status === "running");
-          const windowEnd = runningIndex < 0 ? rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
-          const visibleRows = rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
-          return visibleRows.map((row) => {
-            const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
-            if (row.status === "running") {
-              const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
-              const chars =
-                row.receivedChars > 0
-                  ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}`
-                  : "";
-              return `${theme.fg("accent", frame)}${theme.fg("dim", ` ${row.label} · ${count}${chars}`)}`;
-            } else if (row.status === "done") {
-              return `${theme.fg("success", "✓")}${theme.fg("dim", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
-            } else if (row.status === "skipped") {
-              return theme.fg("dim", `⚠ ${row.label} · ${count} · skipped`);
-            } else {
-              return theme.fg("dim", `○ ${row.label} · ${count} · pending`);
-            }
-          });
-        },
-      };
-    },
-    { placement: "aboveEditor" },
-  );
+  dispose(): void {
+    if (this.animationTimer) clearInterval(this.animationTimer);
+    this.animationTimer = undefined;
+  }
 
-  return {
-    updateRow(index: number, status: RowStatus, chars?: number) {
-      if (index >= 0 && index < rows.length) {
-        rows[index].status = status;
-        if (chars !== undefined) rows[index].receivedChars = chars;
-        syncAnimationLoop();
-      }
-    },
-    clearWidget() {
-      stopAnimationLoop();
-      requestRender = undefined;
-      ctx.ui.setWidget(PROGRESS_WIDGET_ID, undefined);
-    },
-  };
+  private syncAnimation(): void {
+    const hasRunningRows = this.rows.some((row) => row.status === "running");
+    if (hasRunningRows && !this.animationTimer) {
+      this.animationTimer = setInterval(() => this.tui.requestRender(), SPINNER_INTERVAL_MS);
+      this.animationTimer.unref?.();
+    } else if (!hasRunningRows && this.animationTimer) {
+      clearInterval(this.animationTimer);
+      this.animationTimer = undefined;
+    }
+  }
+
+  private frameLine(content: string, innerWidth: number): string {
+    const truncated = truncateToWidth(content, innerWidth, "");
+    return `${this.theme.fg("border", "│")}${truncated}${" ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)))}${this.theme.fg("border", "│")}`;
+  }
+
+  private rowLine(row: WidgetRow): string {
+    const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
+    if (row.status === "running") {
+      const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
+      const chars = row.receivedChars > 0 ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}` : "";
+      return `${this.theme.fg("accent", frame)}${this.theme.fg("dim", ` ${row.label} · ${count}${chars}`)}`;
+    }
+    if (row.status === "done") return `${this.theme.fg("success", "✓")}${this.theme.fg("dim", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
+    if (row.status === "skipped") return this.theme.fg("dim", `⚠ ${row.label} · ${count} · skipped`);
+    return this.theme.fg("dim", `○ ${row.label} · ${count} · pending`);
+  }
+
+  override render(width: number): string[] {
+    const innerWidth = Math.max(42, width - 2);
+    const runningIndex = this.rows.findIndex((row) => row.status === "running");
+    const windowEnd = runningIndex < 0 ? this.rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
+    const visibleRows = this.rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
+    const title = this.cancelling ? this.theme.fg("warning", "Pruner cancelling") : this.theme.fg("accent", "Pruner now");
+    const hint = this.cancelling
+      ? this.theme.fg("dim", "Waiting for already-started batches to finish…")
+      : this.theme.fg("dim", "Esc / q: stop scheduling new batches (active batches finish)");
+    const border = this.theme.fg("border", `┌${"─".repeat(innerWidth)}┐`);
+    const divider = this.theme.fg("border", `├${"─".repeat(innerWidth)}┤`);
+    const bottom = this.theme.fg("border", `└${"─".repeat(innerWidth)}┘`);
+    return [border, this.frameLine(` ${title}`, innerWidth), divider,
+      ...visibleRows.map((row) => this.frameLine(` ${this.rowLine(row)}`, innerWidth)),
+      divider, this.frameLine(` ${hint}`, innerWidth), bottom];
+  }
 }
 
 // ── Command registration ────────────────────────────────────────────────────
@@ -395,6 +398,9 @@ export function registerCommands(
           const config = currentConfig.value;
           const availableModels = ctx.modelRegistry?.getAvailable() ?? [];
 
+          const thresholdValues = [...new Set([...RAW_CHAR_THRESHOLD_PRESETS, config.minRawCharsThreshold])]
+            .sort((a, b) => a - b)
+            .map(String);
           const items: SettingItem[] = [
             {
               id: "enabled",
@@ -475,6 +481,13 @@ export function registerCommands(
               description: remindUnprunedCountDescription(config),
             },
             {
+              id: "minRawCharsThreshold",
+              label: "Min raw chars",
+              values: thresholdValues,
+              currentValue: String(config.minRawCharsThreshold),
+              description: rawCharThresholdDescription(config.minRawCharsThreshold),
+            },
+            {
               id: "batchingMode",
               label: "Batching mode",
               values: BATCHING_MODES.map((m) => m.value),
@@ -530,6 +543,12 @@ export function registerCommands(
               if (pruneTriggerItem) {
                 pruneTriggerItem.description = pruneTriggerDescription(newConfig.pruneOn);
               }
+            } else if (id === "minRawCharsThreshold") {
+              const threshold = parseMinRawCharsThreshold(newValue);
+              if (threshold === null) return;
+              newConfig.minRawCharsThreshold = threshold;
+              const thresholdItem = items.find((item) => item.id === "minRawCharsThreshold");
+              if (thresholdItem) thresholdItem.description = rawCharThresholdDescription(threshold);
             } else if (id === "batchingMode") {
               newConfig.batchingMode = newValue as ContextPruneConfig["batchingMode"];
               const batchingItem = items.find((item) => item.id === "batchingMode");
@@ -600,7 +619,7 @@ export function registerCommands(
             ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
             : "\n  (no summarizer calls yet)";
           ctx.ui.notify(
-            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
+            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min chars: ${cfg.minRawCharsThreshold.toLocaleString()} (${cfg.minRawCharsThreshold === 0 ? "off" : "skip at or below"})\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
           );
           break;
         }
@@ -733,6 +752,27 @@ export function registerCommands(
           break;
         }
 
+        // ── /pruner min-raw-chars [n] ──
+        case "min-raw-chars": {
+          const thresholdArg = subArgs[0];
+          if (!thresholdArg) {
+            ctx.ui.notify(
+              `Min raw chars threshold: ${currentConfig.value.minRawCharsThreshold.toLocaleString()}\n${rawCharThresholdDescription(currentConfig.value.minRawCharsThreshold)}`,
+              "info",
+            );
+            break;
+          }
+          const threshold = parseMinRawCharsThreshold(thresholdArg);
+          if (threshold === null) {
+            ctx.ui.notify("Invalid min raw chars threshold. Use a non-negative integer; 0 disables skipping.", "warning");
+            break;
+          }
+          currentConfig.value = { ...currentConfig.value, minRawCharsThreshold: threshold };
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(`Min raw chars threshold set to: ${threshold.toLocaleString()}\n${rawCharThresholdDescription(threshold)}`);
+          break;
+        }
+
         // ── /pruner now ──
         case "now": {
           if (!currentConfig.value.enabled) {
@@ -740,43 +780,34 @@ export function registerCommands(
             return;
           }
 
-          // Capture the pending queue first so we can pre-build the widget rows.
+          // Capture the pending queue first so the centered overlay can pre-build its rows.
           const batches = capturePendingBatches(ctx);
           if (batches.length === 0) {
             ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
             break;
           }
 
-          // Open the progress widget above the editor — one row per batch.
-          // Keep the progress widget visible beneath a small cancellation overlay.
-          // Esc/q requests a soft stop: active calls finish and persist, while no
-          // additional batches are scheduled.
+          // A centered overlay owns focus for the duration of manual pruning.
+          // It displays up to sixteen rows and uses Esc/q for a soft stop.
           const controller = new AbortController();
-          let closeCancellationOverlay: (() => void) | undefined;
-          const cancellationOverlay = (ctx as any).hasUI
+          let closeProgressOverlay: (() => void) | undefined;
+          let progressOverlay: PruneProgressOverlay | undefined;
+          const progressOverlayPromise = ctx.hasUI
             ? ctx.ui.custom<void>(
-                (_tui, theme, _keybindings, done) => {
-                  closeCancellationOverlay = () => done(undefined);
-                  const message = new Text(
-                    `${theme.fg("accent", "pruner now running")}\n${theme.fg("dim", "Press Esc or q to stop scheduling new batches.")}`,
-                    1,
-                    1,
-                  );
-                  (message as any).onKey = (key: string) => {
-                    if (key === "escape" || key === "\x1b" || key === "q") {
-                      controller.abort();
-                      done(undefined);
-                      return true;
-                    }
-                    return true;
-                  };
-                  return message;
+                (tui, theme, _keybindings, done) => {
+                  closeProgressOverlay = () => done(undefined);
+                  progressOverlay = new PruneProgressOverlay(tui, theme, batches, () => controller.abort());
+                  return progressOverlay;
                 },
-                { overlay: true, overlayOptions: { width: 58, anchor: "bottom" } },
+                {
+                  overlay: true,
+                  overlayOptions: { width: 80, maxHeight: "80%", anchor: "center" },
+                  onHandle: (handle) => handle.focus(),
+                },
               )
             : undefined;
-
-          const { updateRow, clearWidget } = startPrunerWidget(ctx, batches);
+          const updateRow = (index: number, status: RowStatus, chars?: number) =>
+            progressOverlay?.updateRow(index, status, chars);
 
           const result = await flushPending(ctx, {
             previewedBatches: batches,
@@ -795,11 +826,8 @@ export function registerCommands(
             },
           });
 
-          closeCancellationOverlay?.();
-          await cancellationOverlay;
-
-          // Remove the widget and restore the normal footer status.
-          clearWidget();
+          closeProgressOverlay?.();
+          await progressOverlayPromise;
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
 
           if (!result.ok) {
