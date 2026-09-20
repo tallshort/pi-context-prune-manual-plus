@@ -2,8 +2,16 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { ContextPruneConfig, PruneOn, SummarizerThinking } from "./types.js";
-import { DEFAULT_CONFIG, DEFAULT_MANUAL_PRUNE_CONCURRENCY, MANUAL_PRUNE_CONCURRENCY_MAX, MANUAL_PRUNE_CONCURRENCY_MIN, PRUNE_ON_MODES, SUMMARIZER_THINKING_LEVELS } from "./types.js";
-export { DEFAULT_MANUAL_PRUNE_CONCURRENCY } from "./types.js";
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_MANUAL_PRUNE_CONCURRENCY,
+  DEFAULT_MIN_RAW_CHARS_THRESHOLD,
+  MANUAL_PRUNE_CONCURRENCY_MAX,
+  MANUAL_PRUNE_CONCURRENCY_MIN,
+  PRUNE_ON_MODES,
+  SUMMARIZER_THINKING_LEVELS,
+} from "./types.js";
+export { DEFAULT_MANUAL_PRUNE_CONCURRENCY, DEFAULT_MIN_RAW_CHARS_THRESHOLD } from "./types.js";
 
 /** Path to the extension's own settings file, independent of any project. */
 export const SETTINGS_PATH = join(homedir(), ".pi", "agent", "context-prune", "settings.json");
@@ -19,7 +27,7 @@ function isSummarizerThinking(value: unknown): value is SummarizerThinking {
 function normalizeMinRawCharsThreshold(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
-    : DEFAULT_CONFIG.minRawCharsThreshold;
+    : DEFAULT_MIN_RAW_CHARS_THRESHOLD;
 }
 
 export function normalizeManualPruneConcurrency(value: unknown): number {

@@ -200,6 +200,7 @@ export interface ContextPruneConfig {
 export const MANUAL_PRUNE_CONCURRENCY_MIN = 1;
 export const MANUAL_PRUNE_CONCURRENCY_MAX = 16;
 export const DEFAULT_MANUAL_PRUNE_CONCURRENCY = 8;
+export const DEFAULT_MIN_RAW_CHARS_THRESHOLD = 600;
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
   enabled: false,
@@ -211,7 +212,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   remindUnprunedCount: true,
   notifySkipped: true,
   batchingMode: "turn",
-  minRawCharsThreshold: 0,
+  minRawCharsThreshold: DEFAULT_MIN_RAW_CHARS_THRESHOLD,
   manualPruneConcurrency: DEFAULT_MANUAL_PRUNE_CONCURRENCY,
 };
 

@@ -22,13 +22,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tallshort/pi-context-prune.git"
+    "url": "git+https://github.com/tallshort/pi-context-prune-manual-plus.git"
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/tallshort/pi-context-prune/issues"
+    "url": "https://github.com/tallshort/pi-context-prune-manual-plus/issues"
   },
-  "homepage": "https://github.com/tallshort/pi-context-prune#readme",
+  "homepage": "https://github.com/tallshort/pi-context-prune-manual-plus#readme",
   "pi": {
     "extensions": [
       "./dist/index.js"
