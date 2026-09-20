@@ -8,6 +8,18 @@ describe("summarizer failure classification", () => {
     expect(classifySummarizerFailure(new Error("503 service unavailable"))).toMatchObject({ failureKind: "provider", retryable: true });
   });
 
+  it("redacts bearer credentials before a failure can reach the overlay", () => {
+    for (const message of [
+      "Authorization: Bearer sk-secret",
+      "authorization=Bearer token-value",
+      "Bearer standalone-secret",
+      "api_key: api-secret",
+    ]) {
+      const failure = classifySummarizerFailure(new Error(message));
+      expect(failure.failureMessage).not.toMatch(/sk-secret|token-value|standalone-secret|api-secret/);
+      expect(failure.failureMessage).toContain("[redacted]");
+    }
+  });
   it("does not retry permanent provider failures and returns a bounded safe message", () => {
     const failure = classifySummarizerFailure(new Error("invalid credentials\nstack details"));
     expect(failure).toEqual({ failureKind: "provider", failureMessage: "invalid credentials", retryable: false });

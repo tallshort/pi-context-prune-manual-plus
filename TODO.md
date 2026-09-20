@@ -6,6 +6,8 @@ Future improvements that preserve the core context-pruning algorithm.
 
 - [x] Make `/pruner now` concurrency configurable (manually verified by the user).
 - [ ] Add provider-limit backoff and automatic throttling after retryable failures.
+- [ ] Preserve successful out-of-order batch results when an earlier batch fails, without violating contiguous frontier advancement.
+- [ ] Keep capture turn indexes stable across compaction so pending batches are never rejected as older than the persisted frontier.
 - [x] Add one automatic retry for retryable `/pruner now` summarizer/provider failures, with per-batch failure visibility and cumulative retry/failure statistics (manually verified by the user).
 - [x] Add a dry-run/debug mode that reports candidate batches and estimated savings without writing summaries or advancing the frontier (manually verified by the user).
 - [ ] **Pi core dependency:** calculate ephemeral context usage from messages after extension `context` hooks run, and use that value for both footer display and auto-compaction. Until Pi exposes this, prune can reduce the next provider request while Pi continues to display and compact against stale session usage.

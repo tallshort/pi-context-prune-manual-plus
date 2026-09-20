@@ -375,6 +375,14 @@ export default function (pi: ExtensionAPI) {
       const allOversized = oversizedBatches.length === processedBatches.length;
       const allSmall = smallBatchCount === processedBatches.length;
       if (frontierBatches.length === 0) {
+        // Completed batches may be indexed behind a cancellation hole. Their
+        // frontier cannot advance yet, but their cumulative stats are durable.
+        try {
+          if (delivery === "runtime") statsAccum.persist(pi);
+          else appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
+        } catch {
+          // Keep the existing cancellation result even if stats persistence fails.
+        }
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
         return {
           ok: true,

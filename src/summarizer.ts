@@ -75,7 +75,8 @@ function receivedTextChars(message: AssistantMessage): number {
 function safeFailureMessage(value: unknown): string {
   const firstLine = (value instanceof Error ? value.message : String(value)).split(/[\r\n]/, 1)[0];
   return firstLine
-    .replace(/(?:api[_-]?key|authorization|bearer)\s*[:=]\s*\S+/gi, "[redacted]")
+    .replace(/\b(?:api[_-]?key|authorization)\b\s*[:=]?\s*(?:bearer\s+)?\S+/gi, "[redacted]")
+    .replace(/\bbearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/https?:\/\/[^\s]+/gi, "[endpoint]")
     .slice(0, 160) || "provider error";
 }
