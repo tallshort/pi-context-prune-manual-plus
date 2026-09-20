@@ -16,5 +16,5 @@ Future improvements that preserve the core context-pruning algorithm.
 
 ## Test coverage
 
-- [ ] Add unit tests for compaction-boundary capture, small-batch threshold handling, partial flush failures, and frontier advancement.
+- [ ] Extend unit tests beyond manual cancellation: cover compaction-boundary capture, small-batch threshold handling, partial flush failures, and frontier advancement.
 - [ ] Add integration-style tests for `/pruner now` progress, cancellation, and session-branch restoration.
