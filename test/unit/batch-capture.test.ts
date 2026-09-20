@@ -96,6 +96,7 @@ describe("captureUnindexedBatchesFromSession active branch", () => {
 
     expect(batches).toHaveLength(1);
     expect(batches[0].toolCalls.map((toolCall) => toolCall.toolCallId)).toEqual(["active-call"]);
+    expect(batches[0].turnIndex).toBe(1);
     expect(batches[0].toolCalls.map((toolCall) => toolCall.resultText)).not.toContain("stale result");
   });
 });

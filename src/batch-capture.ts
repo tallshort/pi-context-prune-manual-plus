@@ -74,6 +74,13 @@ export function captureUnindexedBatchesFromSession(
     ? branch.findIndex((entry) => entry.id === latestCompaction.firstKeptEntryId)
     : -1;
   const activeBranch = firstKeptIndex >= 0 ? branch.slice(firstKeptIndex) : branch;
+  // Compaction makes only the tail eligible for recapture, but the session
+  // branch still retains preceding entries. Count their assistant messages as
+  // an offset so active-tail turn indexes remain session-relative and continue
+  // to compare correctly with the persisted frontier.
+  const turnIndexOffset = firstKeptIndex > 0
+    ? branch.slice(0, firstKeptIndex).filter((entry) => entry.type === "message" && entry.message?.role === "assistant").length
+    : 0;
 
   const resultMap = new Map<string, any>();
   for (const entry of activeBranch) {
@@ -90,7 +97,7 @@ export function captureUnindexedBatchesFromSession(
   // ToolResultMessages from the context event but leaves AssistantMessages in the
   // session branch, so the count of all assistant messages never decreases and
   // always matches Pi's own event.turnIndex numbering.
-  let turnCounter = 0;
+  let turnCounter = turnIndexOffset;
 
   // userTurnGroup increments on every user message seen while walking the branch.
   // All assistant tool-call batches between two consecutive user messages share the
