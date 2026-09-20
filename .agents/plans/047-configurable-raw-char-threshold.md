@@ -1,5 +1,5 @@
 ---
-name: 054-configurable-raw-char-threshold
+name: 047-configurable-raw-char-threshold
 description: Add a persisted minRawCharsThreshold setting for batch-summary skipping.
 steps:
   - phase: design
@@ -15,7 +15,7 @@ steps:
       - "- [x] step 1: update documentation and rebuild the ignored bundle"
 ---
 
-# 054-configurable-raw-char-threshold
+# 047-configurable-raw-char-threshold
 
 ## Phase 1 — Design
 - [x] step 1: trace config, settings overlay, command, and skip decision paths
