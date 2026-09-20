@@ -243,6 +243,7 @@ Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-i
   "summarizerThinking": "default",
   "pruneOn": "agent-message",
   "remindUnprunedCount": true,
+  "notifySkipped": true,
   "batchingMode": "turn",
   "minRawCharsThreshold": 600,
   "manualPruneConcurrency": 8
@@ -427,11 +428,3 @@ To review and merge upstream changes safely on a dedicated branch, run:
 ```
 
 The wizard fetches `championswimmer/pi-context-prune`, creates a `sync/upstream-main-*` branch, asks before merging, runs validation only with your confirmation, and can push/create a PR through `gh`.
-
-## Follow-up ideas
-
-- Auto-summarize older unsummarized turns on `/pruner on`
-- Batch multiple turn summaries into a single meta-summary at compaction time
-- ~~`/pruner original-tree`~~ ✅ `/pruner tree` foldable tree browser — done
-- Configurable pruning policy (prune only large tool results, prune by token count threshold)
-- Tighter `/settings` integration once Pi exposes a settings UI API
