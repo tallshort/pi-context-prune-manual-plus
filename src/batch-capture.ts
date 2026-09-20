@@ -65,8 +65,18 @@ export function captureUnindexedBatchesFromSession(
 ): CapturedBatch[] {
   // branch is SessionEntry[]. Each message entry has { type: "message", message: AgentMessage }.
   // We must unwrap the SessionEntry wrapper before accessing role/toolCallId.
+  // After compaction, only scan the branch tail Pi retained in active context.
+  // Earlier entries have already been summarized and are not eligible again.
+  const latestCompaction = [...branch]
+    .reverse()
+    .find((entry) => entry.type === "compaction" && entry.firstKeptEntryId);
+  const firstKeptIndex = latestCompaction
+    ? branch.findIndex((entry) => entry.id === latestCompaction.firstKeptEntryId)
+    : -1;
+  const activeBranch = firstKeptIndex >= 0 ? branch.slice(firstKeptIndex) : branch;
+
   const resultMap = new Map<string, any>();
-  for (const entry of branch) {
+  for (const entry of activeBranch) {
     if (entry.type !== "message") continue;
     const m = entry.message;
     if (m.role === "toolResult" && m.toolCallId) {
@@ -88,7 +98,7 @@ export function captureUnindexedBatchesFromSession(
   // a single user → final-agent-message span when batchingMode === "agent-message".
   let userTurnGroup = 0;
 
-  for (const entry of branch) {
+  for (const entry of activeBranch) {
     if (entry.type !== "message") continue;
     const msg = entry.message;
 

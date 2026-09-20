@@ -17,13 +17,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
 import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
+import { runAbortableBounded, runWithOneRetry } from "./src/manual-prune-scheduler.js";
+import { planFlushSettlement } from "./src/flush-settlement.js";
+import { shouldSkipMinRawCharsThreshold } from "./src/min-raw-chars-threshold.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
-import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
+import { registerCommands, pruneStatusText, setPruneStatusWidget } from "./src/commands.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
-import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions } from "./src/types.js";
+import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions, SummarizeResult, SummarizeFailure } from "./src/types.js";
 import {
   DEFAULT_CONFIG,
   CONTEXT_PRUNE_TOOL_NAME,
@@ -58,8 +61,8 @@ export default function (pi: ExtensionAPI) {
   let isFlushing = false;
 
   type FlushResult =
-    | { ok: true; reason: "flushed" | "skipped-oversized"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
-    | { ok: false; reason: "empty" | "already-flushing" | "summarizer-failed" | "stale-context" | "failed" | "aborted"; error?: string };
+    | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
+    | { ok: false; reason: "empty" | "already-flushing" | "summarizer-failed" | "stale-context" | "failed" | "aborted" | "cancelled"; error?: string };
 
   type SessionAppender = {
     appendCustomEntry(customType: string, data?: unknown): string;
@@ -150,9 +153,8 @@ export default function (pi: ExtensionAPI) {
   };
 
   // Summarizes + indexes all pending batches.
-  // When options.onProgress is provided batches are processed sequentially
-  // (one LLM call each) so the caller can update per-row UI. Otherwise all
-  // batches are summarized in parallel (one summarizeBatches call).
+  // Summarizes + indexes all pending batches. `/pruner now` uses bounded
+  // concurrency so callers can update per-row UI; other paths summarize in parallel.
   // Runtime delivery is used while the agent/tool loop is active so Pi can place
   // steer messages at protocol-safe boundaries. Session delivery is used only for
   // agent-message's final-message flush, where print-mode Pi may invalidate pi.*
@@ -198,55 +200,112 @@ export default function (pi: ExtensionAPI) {
       const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
         options.onBatchTextProgress?.(index, total, batch, receivedChars);
       };
-
-      // Summarize batches. When onProgress is provided (i.e. /pruner now with the
-      // multi-row overlay) we process sequentially so each row can be checked off
-      // as its LLM call completes. Otherwise all batches run in parallel.
-      let results: (import("./src/types.js").SummarizeResult | null)[];
+      const isSmallBatch = (batch: CapturedBatch) =>
+        shouldSkipMinRawCharsThreshold(
+          batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0),
+          currentConfig.value.minRawCharsThreshold,
+        );
+      type BatchResult = SummarizeResult | SummarizeFailure | { skippedSmall: true } | null;
+      const isFailure = (result: BatchResult): result is SummarizeFailure =>
+        result !== null && "failureKind" in result;
+      // `/pruner now` reports individual row state. Limit its concurrent calls so the
+      // widget remains responsive without overwhelming the summarizer provider.
+      // Other flush paths run fully parallel below.
+      let results: BatchResult[];
       if (options.onProgress) {
-        results = [];
-        for (let i = 0; i < batches.length; i++) {
-          options.onProgress(i, batches.length, batches[i], "start");
-          const r = await summarizeBatch(batches[i], currentConfig.value, ctx, {
-            signal: options.signal,
-            onTextProgress: (receivedChars) => {
-              reportBatchTextProgress(i, batches.length, batches[i], receivedChars);
-            },
-          });
-          results.push(r);
-          options.onProgress(i, batches.length, batches[i], r ? "done" : "skipped");
-        }
+        results = await runAbortableBounded(
+          batches,
+          currentConfig.value.manualPruneConcurrency,
+          options.signal,
+          async (batch, index) => {
+            if (isSmallBatch(batch)) {
+              options.onProgress!(index, batches.length, batch, "skipped");
+              return { skippedSmall: true as const };
+            }
+            let attempts = 0;
+            const attempt = async () => {
+              attempts += 1;
+              options.onProgress!(index, batches.length, batch, "start", { attempts, retryCount: attempts - 1 });
+              return summarizeBatch(batch, currentConfig.value, ctx, {
+                // Manual cancellation is soft: finish already-started calls so their
+                // completed summaries can still be indexed, but do not start another.
+                signal: undefined,
+                notifyOnFailure: false,
+                onTextProgress: (receivedChars) => reportBatchTextProgress(index, batches.length, batch, receivedChars),
+              });
+            };
+            const retry = await runWithOneRetry(attempt, (result) => {
+              if (!isFailure(result) || !result.retryable || options.signal?.aborted) return false;
+              statsAccum.addRetry();
+              options.onProgress!(index, batches.length, batch, "retry", {
+                attempts: 1,
+                retryCount: 1,
+                failureKind: result.failureKind,
+                failureMessage: result.failureMessage,
+              });
+              return true;
+            });
+            const result = retry.value;
+            if (isFailure(result)) {
+              statsAccum.addFinalFailure(result.failureKind);
+              options.onProgress!(index, batches.length, batch, "failed", {
+                attempts: retry.attempts,
+                retryCount: retry.retryCount,
+                failureKind: result.failureKind,
+                failureMessage: result.failureMessage,
+              });
+            } else {
+              options.onProgress!(index, batches.length, batch, "done", { attempts: retry.attempts, retryCount: retry.retryCount });
+            }
+            return result;
+          },
+        );
       } else {
-        // Parallel — one LLM call per batch, all in flight simultaneously.
-        results = await summarizeBatches(batches, currentConfig.value, ctx, {
-          onBatchTextProgress: reportBatchTextProgress,
-          signal: options.signal,
-        });
+        const batchesToSummarize = batches.filter((batch) => !isSmallBatch(batch));
+        const summarizedResults = batchesToSummarize.length === 0
+          ? []
+          : await summarizeBatches(batchesToSummarize, currentConfig.value, ctx, {
+              onBatchTextProgress: reportBatchTextProgress,
+              signal: options.signal,
+            });
+        let summarizedIndex = 0;
+        results = batches.map((batch) =>
+          isSmallBatch(batch) ? { skippedSmall: true } : summarizedResults[summarizedIndex++],
+        );
       }
+      const wasCancelled = options.signal?.aborted === true;
 
-      // Process results in order; stop at first null (individual call failure).
-      // Batches before the first failure are persisted; remaining are restored to
-      // pendingBatches so they are retried on the next flush.
+      // Structured failures are restored below; record aggregate categories only.
+      if (!options.onProgress) {
+        for (const result of results) if (isFailure(result)) statsAccum.addFinalFailure(result.failureKind);
+      }
+      const settlement = planFlushSettlement(results.map((result) => result !== null && !isFailure(result)), wasCancelled);
       const processedBatches: CapturedBatch[] = [];
+      const processedIndexes = new Set<number>();
       let totalRawCharCount = 0;
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
       const oversizedBatches: CapturedBatch[] = [];
-      let firstFailureIndex = -1;
+      let smallBatchCount = 0;
+      let persistenceFailureIndex: number | undefined;
 
-      for (let i = 0; i < batches.length; i++) {
+      for (const i of settlement.processIndexes) {
         const result = results[i];
-        if (!result) {
-          firstFailureIndex = i;
-          break;
+        const batch = batches[i];
+        if (!result || isFailure(result)) continue;
+        const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
+        if ("skippedSmall" in result) {
+          totalRawCharCount += batchRawCharCount;
+          totalToolCallCount += batch.toolCalls.length;
+          smallBatchCount += 1;
+          processedBatches.push(batch);
+          processedIndexes.add(i);
+          continue;
         }
 
-        const batch = batches[i];
-        const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
         const summaryRefs = indexer.allocateSummaryRefs(batch);
         const summaryText = wrapSummaryForContext(result.summaryText + formatSummaryToolCallRefs(summaryRefs));
         const shouldSkipOversized = summaryText.length > batchRawCharCount;
-
         statsAccum.add(result.usage);
         totalRawCharCount += batchRawCharCount;
         totalSummaryCharCount += summaryText.length;
@@ -271,47 +330,73 @@ export default function (pi: ExtensionAPI) {
               indexer.registerSummaryRefs(summaryRefs);
               persistBatchIndex(batch, appendEntry);
             }
+            statsAccum.addPrunedChars(batchRawCharCount, summaryText.length);
           } else {
             oversizedBatches.push(batch);
           }
         } catch (err) {
-          // Persistence error mid-loop: stop here, restore this and remaining batches.
+          // Persistence error mid-loop: restore this and later batches.
           if (isStaleContextError(err)) {
-            restoreBatches(batches.slice(i));
-            // Advance frontier to what we managed to persist before this point
+            persistenceFailureIndex = i;
             break;
           }
           throw err;
         }
 
         processedBatches.push(batch);
+        processedIndexes.add(i);
       }
 
-      // Restore unprocessed batches (those at and after the first failure)
-      if (firstFailureIndex >= 0) {
-        restoreBatches(batches.slice(firstFailureIndex));
+      // Restore planner-selected work plus the failed persistence range, if any.
+      // This preserves retry behavior when session persistence becomes stale.
+      const restoreIndexes = new Set(settlement.restoreIndexes);
+      if (persistenceFailureIndex !== undefined) {
+        for (let i = persistenceFailureIndex; i < batches.length; i++) restoreIndexes.add(i);
       }
+      restoreBatches([...restoreIndexes].sort((a, b) => a - b).map((index) => batches[index]));
 
       if (processedBatches.length === 0) {
-        // Nothing was persisted (all calls failed or first call failed)
+        // Retry/failure counters are durable even when no batch produced a summary.
+        try {
+          if (delivery === "runtime") statsAccum.persist(pi);
+          else appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
+        } catch {
+          // Session/index persistence failures stay pending and are never retried here.
+        }
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
-        return { ok: false, reason: "summarizer-failed" };
+        return { ok: false, reason: wasCancelled ? "cancelled" : "summarizer-failed" };
       }
 
-      // Advance frontier to the last batch we actually processed.
-      const lastBatch = processedBatches[processedBatches.length - 1];
-      const lastTC = lastBatch.toolCalls[lastBatch.toolCalls.length - 1];
+      // The settlement planner limits the frontier to the contiguous completed
+      // prefix after cancellation. A persistence error can shorten it further.
+      const frontierBatches = settlement.frontierIndexes
+        .filter((index) => processedIndexes.has(index))
+        .map((index) => batches[index]);
       const allOversized = oversizedBatches.length === processedBatches.length;
+      const allSmall = smallBatchCount === processedBatches.length;
+      if (frontierBatches.length === 0) {
+        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
+        return {
+          ok: true,
+          reason: "cancelled",
+          batchCount: processedBatches.length,
+          toolCallCount: totalToolCallCount,
+          rawCharCount: totalRawCharCount,
+          summaryCharCount: totalSummaryCharCount,
+        };
+      }
+      const lastBatch = frontierBatches[frontierBatches.length - 1];
+      const lastTC = lastBatch.toolCalls[lastBatch.toolCalls.length - 1];
       const frontierSnapshot: PruneFrontier = {
         lastAttemptedToolCallId: lastTC.toolCallId,
         lastAttemptedToolName: lastTC.toolName,
         lastAttemptedTurnIndex: lastBatch.turnIndex,
         lastAttemptedTimestamp: lastBatch.timestamp,
-        attemptedBatchCount: processedBatches.length,
+        attemptedBatchCount: frontierBatches.length,
         attemptedToolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,
         summaryCharCount: totalSummaryCharCount,
-        outcome: allOversized ? "skipped-oversized" : "summarized",
+        outcome: allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "summarized",
       };
 
       try {
@@ -338,7 +423,8 @@ export default function (pi: ExtensionAPI) {
       if (currentConfig.value.notifySkipped) {
         for (const batch of oversizedBatches) {
           const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-          const batchSummaryLen = results[batches.indexOf(batch)]?.summaryText.length ?? 0;
+          const batchResult = results[batches.indexOf(batch)];
+          const batchSummaryLen = batchResult && !("skippedSmall" in batchResult) ? batchResult.summaryText.length : 0;
           safeNotify(
             ctx,
             `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,
@@ -349,7 +435,7 @@ export default function (pi: ExtensionAPI) {
 
       return {
         ok: true,
-        reason: allOversized ? "skipped-oversized" : "flushed",
+        reason: wasCancelled ? "cancelled" : allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "flushed",
         batchCount: processedBatches.length,
         toolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,
@@ -463,30 +549,12 @@ export default function (pi: ExtensionAPI) {
     if (currentConfig.value.pruneOn === "every-turn") {
       await flushPending(ctx, { delivery: "session" });
     } else {
-      // Let the user know a batch is queued
       const n = pendingBatches.length;
-      let trigger: string;
-      switch (currentConfig.value.pruneOn) {
-        case "on-context-tag":
-          trigger = "next context_checkpoint";
-          break;
-        case "agent-message":
-          trigger = "agent's next text response";
-          break;
-        case "agentic-auto":
-          trigger = "agent calling context_prune";
-          break;
-        default:
-          trigger = "/pruner now";
-          break;
-      }
       if (currentConfig.value.showPruneStatusLine) {
-        setPruneStatusWidget(ctx, currentConfig.value, `prune: ${n} pending`);
-        safeNotify(
-          ctx,
-          `pruner: ${n} turn${n === 1 ? "" : "s"} queued — will summarize on ${trigger}`,
-          "info"
-        );
+        const statusText = currentConfig.value.pruneOn === "on-demand"
+          ? pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length)
+          : `prune: ${n} pending`;
+        setPruneStatusWidget(ctx, currentConfig.value, statusText);
       }
     }
   });
@@ -516,6 +584,11 @@ export default function (pi: ExtensionAPI) {
   // already be disposing the session, so avoid starting a best-effort LLM call here.
   pi.on("agent_end", async (_event, ctx) => {
     if (!currentConfig.value.enabled) return;
+    if (currentConfig.value.pruneOn === "on-demand") {
+      const pendingCount = capturePendingBatches(ctx).length;
+      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), pendingCount));
+      return;
+    }
     if (pendingBatches.length === 0) return;
     setPruneStatusWidget(ctx, currentConfig.value, `prune: ${pendingBatches.length} pending`);
   });

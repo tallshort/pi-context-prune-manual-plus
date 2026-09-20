@@ -1,0 +1,55 @@
+---
+name: 046-manual-prune-progress
+description: Make /pruner now concurrent, observable, and safely cancellable.
+steps:
+  - phase: design
+    steps:
+      - "- [x] step 1: trace manual batch scheduling, progress rendering, and cancellation boundaries"
+  - phase: implementation
+    steps:
+      - "- [x] step 1: process up to eight manual batches concurrently with per-batch progress"
+      - "- [x] step 2: render a centered focusable overlay with up to sixteen rows and themed status output"
+      - "- [x] step 3: softly cancel scheduling while preserving completed in-flight results"
+      - "- [x] step 4: use Pi's configured cancel key and status-bearing overlay title"
+      - "- [x] step 5: report completed-batch progress rather than a fixed worker count"
+  - phase: validation
+    steps:
+      - "- [x] step 1: add regression tests for cancel-key recognition and post-abort scheduling"
+      - "- [x] step 2: run unit tests and rebuild the ignored bundle"
+      - "- [x] step 3: cover dynamic completed-batch title progress"
+      - "- [x] step 4: cover normal scheduling and overlay cancellation/close lifecycle"
+      - "- [x] step 5: add command-level integration coverage and organize test layers"
+      - "- [x] step 6: define structured retryable failure classification and non-persistent overlay failure state"
+  - phase: retry-and-failure-visibility
+    steps:
+      - "- [x] step 1: add red unit and integration-style tests for one retry, terminal failures, stats, and themed overlay states"
+      - "- [x] step 2: implement a single retry for retryable manual summarizer/provider failures and persist aggregate stats only"
+      - "- [x] step 3: document the retry contract in README and SPEC"
+      - "- [x] step 4: run tests, bundle validation, and diff validation"
+---
+
+# 046-manual-prune-progress
+
+## Phase 1 — Design
+- [x] step 1: trace manual batch scheduling, progress rendering, and cancellation boundaries
+
+## Phase 2 — Implementation
+- [x] step 1: process up to eight manual batches concurrently with per-batch progress
+- [x] step 2: render a centered focusable overlay with up to sixteen rows and themed status output
+- [x] step 3: softly cancel scheduling while preserving completed in-flight results
+- [x] step 4: use Pi's configured cancel key and status-bearing overlay title
+- [x] step 5: report completed-batch progress rather than a fixed worker count
+
+## Phase 3 — Validation
+- [x] step 1: add regression tests for cancel-key recognition and post-abort scheduling
+- [x] step 2: run unit tests and rebuild the ignored bundle
+- [x] step 3: cover dynamic completed-batch title progress
+- [x] step 4: cover normal scheduling and overlay cancellation/close lifecycle
+- [x] step 5: add command-level integration coverage and organize test layers
+- [x] step 6: define structured retryable failure classification and non-persistent overlay failure state
+
+## Phase 4 — Retry, failure visibility, and validation
+- [x] step 1: add red unit and integration-style tests for one retry, terminal failures, stats, and themed overlay states
+- [x] step 2: implement a single retry for retryable manual summarizer/provider failures and persist aggregate stats only
+- [x] step 3: document the retry contract in README and SPEC
+- [x] step 4: run tests, bundle validation, and diff validation

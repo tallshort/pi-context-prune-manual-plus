@@ -3,20 +3,24 @@ import {
   type SummarizerStats,
   type CapturedBatch,
   type FlushOptions,
+  type ManualPruneProgressDetail,
   PRUNE_ON_MODES,
   BATCHING_MODES,
   STATUS_WIDGET_ID,
-  PROGRESS_WIDGET_ID,
   SUMMARIZER_THINKING_LEVELS,
+  MANUAL_PRUNE_CONCURRENCY_MIN,
+  MANUAL_PRUNE_CONCURRENCY_MAX,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { saveConfig } from "./config.js";
-import { formatTokens, formatCost, formatCharProgress } from "./stats.js";
-import { Container, Text, SettingsList, type SettingItem } from "@earendil-works/pi-tui";
+import { formatTokens, formatCost, formatCharProgress, formatTheoreticalSavings } from "./stats.js";
+import { Container, Text, SettingsList, type SettingItem, type Focusable, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
+import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput } from "./manual-prune-scheduler.js";
+import { calculateDryRunPreview } from "./dry-run.js";
 
 /**
  * Wraps a SettingsList with a border + title, delegating all input handling
@@ -44,11 +48,13 @@ class SettingsOverlay extends Container {
   }
 }
 
+
 // ── Status widget text ──────────────────────────────────────────────────────
 
-export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerStats): string {
+export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerStats, pendingCount = 0): string {
   const mode = PRUNE_ON_MODES.find((m) => m.value === config.pruneOn)?.label ?? config.pruneOn;
-  let text = `prune: ${config.enabled ? "ON" : "OFF"} (${mode})`;
+  const pending = config.pruneOn === "on-demand" && pendingCount > 0 ? `, ${pendingCount} pending` : "";
+  let text = `prune: ${config.enabled ? "ON" : "OFF"} (${mode}${pending})`;
   if (stats && stats.callCount > 0) {
     text += ` │ ↑${formatTokens(stats.totalInputTokens)} ↓${formatTokens(stats.totalOutputTokens)} ${formatCost(stats.totalCost)}`;
   }
@@ -56,7 +62,7 @@ export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerSt
 }
 
 export function setPruneStatusWidget(
-  ctx: { ui: { setStatus: (id: string, text?: string) => void } },
+  ctx: { ui: { setStatus: (id: string, text?: string) => void; theme: { fg: (color: "dim", text: string) => string } } },
   config: ContextPruneConfig,
   value?: SummarizerStats | string,
 ): void {
@@ -64,7 +70,8 @@ export function setPruneStatusWidget(
     ctx.ui.setStatus(STATUS_WIDGET_ID, undefined);
     return;
   }
-  ctx.ui.setStatus(STATUS_WIDGET_ID, typeof value === "string" ? value : pruneStatusText(config, value));
+  const text = typeof value === "string" ? value : pruneStatusText(config, value);
+  ctx.ui.setStatus(STATUS_WIDGET_ID, ctx.ui.theme.fg("dim", text));
 }
 
 // ── Subcommand list (for completions & interactive picker) ──────────────────
@@ -80,7 +87,10 @@ const SUBCOMMANDS = [
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
   { value: "tree",    label: "tree      — browse pruned tool calls in a foldable tree" },
-  { value: "now",     label: "now       — flush pending tool calls immediately (widget progress)" },
+  { value: "dry-run", label: "dry-run   — preview pending work without changing session state" },
+  { value: "now",     label: "now       — flush pending tool calls with a focusable progress overlay" },
+  { value: "min-raw-chars", label: "min-raw-chars — show or set the raw-character skip threshold" },
+  { value: "manual-concurrency", label: "manual-concurrency — show or set `/pruner now` concurrency (1–16)" },
   { value: "help",    label: "help      — show this help" },
 ] as const;
 
@@ -114,6 +124,30 @@ function summarizerThinkingDescription(level: ContextPruneConfig["summarizerThin
     return "Request no summarizer reasoning where the provider adapter supports it; some providers may fall back to their default.";
   }
   return `Request ${level} thinking/reasoning for summarizer calls where supported.`;
+}
+const RAW_CHAR_THRESHOLD_PRESETS = [0, 300, 600, 1200, 2400, 4800] as const;
+const MANUAL_PRUNE_CONCURRENCY_PRESETS = [1, 2, 4, 8, 12, 16] as const;
+
+function rawCharThresholdDescription(value: number): string {
+  return value === 0
+    ? "Disabled: summarize every batch regardless of raw result size."
+    : `Skip batches with ${value.toLocaleString()} or fewer raw result characters (about ${Math.round(value / 4).toLocaleString()} tokens).`;
+}
+
+function parseMinRawCharsThreshold(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function manualPruneConcurrencyDescription(value: number): string {
+  return `Start up to ${value} simultaneous summarizer calls for /pruner now (allowed: ${MANUAL_PRUNE_CONCURRENCY_MIN}–${MANUAL_PRUNE_CONCURRENCY_MAX}).`;
+}
+
+function parseManualPruneConcurrency(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= MANUAL_PRUNE_CONCURRENCY_MIN && parsed <= MANUAL_PRUNE_CONCURRENCY_MAX
+    ? parsed
+    : null;
 }
 
 function parseModelAndThinkingArg(
@@ -196,9 +230,14 @@ Usage:
   /pruner batching                         Show or interactively pick the batching granularity
   /pruner batching turn                    One summary per assistant turn (default)
   /pruner batching agent-message           One summary per user→final-agent-message span (merges all turns in a span)
+  /pruner min-raw-chars                   Show the raw-character skip threshold
+  /pruner min-raw-chars <n>               Skip batches with at most n raw result characters (0 disables)
+  /pruner manual-concurrency              Show /pruner now concurrency
+  /pruner manual-concurrency <1-16>       Set simultaneous /pruner now summary calls
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
-  /pruner now                              Flush pending tool calls immediately (shows live widget progress above the editor)
+  /pruner dry-run                          Preview pending candidates and historical savings estimate without changing session state
+  /pruner now                              Flush pending tool calls immediately (Esc stops scheduling new batches; running ones finish and are retained)
   /pruner help                             Show this help
 
 Agentic-auto reminder:
@@ -229,12 +268,12 @@ Related:
 
 Settings are saved to ~/.pi/agent/context-prune/settings.json`;
 
-// ── Pruner progress widget ────────────────────────────────────────────────────
+// ── Pruner progress overlay ───────────────────────────────────────────────────
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const SPINNER_INTERVAL_MS = 120;
 
-type RowStatus = "pending" | "running" | "done" | "skipped";
+type RowStatus = "pending" | "running" | "retrying" | "done" | "failed" | "skipped";
 
 interface WidgetRow {
   label: string;
@@ -242,110 +281,122 @@ interface WidgetRow {
   rawChars: number;
   status: RowStatus;
   receivedChars: number;
+  attempts: number;
+  retryCount: number;
+  failureKind?: ManualPruneProgressDetail["failureKind"];
+  failureMessage?: string;
 }
 
-/**
- * Registers a multi-row progress widget above the editor for /pruner now.
- * Returns helpers to update row state and clear the widget when done.
- * Each row shows a spinner, label, tool-call count, and live summary char count.
- */
-function startPrunerWidget(
-  ctx: ExtensionCommandContext,
-  batches: CapturedBatch[],
-): {
-  updateRow: (index: number, status: RowStatus, chars?: number) => void;
-  clearWidget: () => void;
-} {
-  const total = batches.length;
-  const rows: WidgetRow[] = batches.map((b, i) => ({
-    label: `Batch ${i + 1}/${total}`,
-    toolCallCount: b.toolCalls.length,
-    rawChars: b.toolCalls.reduce((sum, tc) => sum + tc.resultText.length, 0),
-    status: "pending",
-    receivedChars: 0,
-  }));
+const MAX_PROGRESS_ROWS = 16;
 
-  // Capture tui reference from the factory so updateRow can call requestRender.
-  let requestRender: (() => void) | undefined;
-  let animationTimer: ReturnType<typeof setInterval> | undefined;
+/** Centered, focusable progress UI for `/pruner now`. */
+class PruneProgressOverlay extends Container implements Focusable {
+  private readonly rows: WidgetRow[];
+  private animationTimer: ReturnType<typeof setInterval> | undefined;
+  private _focused = false;
+  private cancelling = false;
 
-  const hasRunningRows = () => rows.some((row) => row.status === "running");
+  get focused(): boolean { return this._focused; }
+  set focused(value: boolean) { this._focused = value; }
 
-  const stopAnimationLoop = () => {
-    if (!animationTimer) return;
-    clearInterval(animationTimer);
-    animationTimer = undefined;
-  };
+  constructor(
+    private readonly tui: TUI,
+    private readonly theme: any,
+    batches: CapturedBatch[],
+    private readonly onCancel: () => void,
+    private readonly matchesCancel: (data: string) => boolean,
+  ) {
+    super();
+    this.rows = batches.map((batch, index) => ({
+      label: `Batch ${index + 1}/${batches.length}`,
+      toolCallCount: batch.toolCalls.length,
+      rawChars: batch.toolCalls.reduce((sum, toolCall) => sum + toolCall.resultText.length, 0),
+      status: "pending",
+      receivedChars: 0,
+      attempts: 0,
+      retryCount: 0,
+    }));
+  }
 
-  // The widget only re-renders when Pi is asked to draw again. Drive a tiny
-  // timer while any row is running so the spinner advances even before the
-  // summarizer streams its first text chunk.
-  const ensureAnimationLoop = () => {
-    if (animationTimer || !requestRender || !hasRunningRows()) return;
-    animationTimer = setInterval(() => {
-      if (!hasRunningRows()) {
-        stopAnimationLoop();
-        return;
-      }
-      requestRender?.();
-    }, SPINNER_INTERVAL_MS);
-    animationTimer.unref?.();
-  };
-
-  const syncAnimationLoop = () => {
-    if (hasRunningRows()) {
-      ensureAnimationLoop();
-    } else {
-      stopAnimationLoop();
+  updateRow(index: number, status: RowStatus, chars?: number, detail?: ManualPruneProgressDetail): void {
+    const row = this.rows[index];
+    if (!row) return;
+    row.status = status;
+    if (chars !== undefined) row.receivedChars = chars;
+    if (detail) {
+      row.attempts = detail.attempts;
+      row.retryCount = detail.retryCount;
+      row.failureKind = detail.failureKind;
+      row.failureMessage = detail.failureMessage;
     }
-    requestRender?.();
-  };
+    this.syncAnimation();
+    this.tui.requestRender();
+  }
 
-  ctx.ui.setWidget(
-    PROGRESS_WIDGET_ID,
-    (tui, _theme) => {
-      requestRender = () => tui.requestRender();
-      syncAnimationLoop();
-      return {
-        invalidate() {},
-        render(_width: number): string[] {
-          return rows.map((row) => {
-            const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
-            if (row.status === "running") {
-              const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
-              const chars =
-                row.receivedChars > 0
-                  ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}`
-                  : "";
-              return `${frame} ${row.label} · ${count}${chars}`;
-            } else if (row.status === "done") {
-              return `✓ ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`;
-            } else if (row.status === "skipped") {
-              return `⚠ ${row.label} · ${count} · skipped`;
-            } else {
-              return `○ ${row.label} · ${count} · pending`;
-            }
-          });
-        },
-      };
-    },
-    { placement: "aboveEditor" },
-  );
+  handleInput(data: string): void {
+    if (isManualPruneCancelInput(data, this.matchesCancel) && !this.cancelling) {
+      this.cancelling = true;
+      this.onCancel();
+      this.tui.requestRender();
+    }
+  }
 
-  return {
-    updateRow(index: number, status: RowStatus, chars?: number) {
-      if (index >= 0 && index < rows.length) {
-        rows[index].status = status;
-        if (chars !== undefined) rows[index].receivedChars = chars;
-        syncAnimationLoop();
-      }
-    },
-    clearWidget() {
-      stopAnimationLoop();
-      requestRender = undefined;
-      ctx.ui.setWidget(PROGRESS_WIDGET_ID, undefined);
-    },
-  };
+  dispose(): void {
+    if (this.animationTimer) clearInterval(this.animationTimer);
+    this.animationTimer = undefined;
+  }
+
+  private syncAnimation(): void {
+    const hasRunningRows = this.rows.some((row) => row.status === "running" || row.status === "retrying");
+    if (hasRunningRows && !this.animationTimer) {
+      this.animationTimer = setInterval(() => this.tui.requestRender(), SPINNER_INTERVAL_MS);
+      this.animationTimer.unref?.();
+    } else if (!hasRunningRows && this.animationTimer) {
+      clearInterval(this.animationTimer);
+      this.animationTimer = undefined;
+    }
+  }
+
+  private frameLine(content: string, innerWidth: number): string {
+    const truncated = truncateToWidth(content, innerWidth, "");
+    return `${this.theme.fg("border", "│")}${truncated}${" ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)))}${this.theme.fg("border", "│")}`;
+  }
+
+  private rowLine(row: WidgetRow): string {
+    const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
+    if (row.status === "running") {
+      const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
+      const chars = row.receivedChars > 0 ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}` : "";
+      return `${this.theme.fg("accent", frame)}${this.theme.fg("text", ` ${row.label} · ${count}${chars}`)}`;
+    }
+    if (row.status === "retrying") {
+      return `${this.theme.fg("accent", "↻")}${this.theme.fg("text", ` ${row.label} · retry ${row.retryCount}/1 · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;
+    }
+    if (row.status === "done") return `${this.theme.fg("success", "✓")}${this.theme.fg("text", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
+    if (row.status === "failed") return `${this.theme.fg("error", "✗")}${this.theme.fg("text", ` ${row.label} · failed after ${row.attempts} attempt${row.attempts === 1 ? "" : "s"} · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;
+    if (row.status === "skipped") return this.theme.fg("text", `⚠ ${row.label} · ${count} · skipped`);
+    return this.theme.fg("text", `○ ${row.label} · ${count} · pending`);
+  }
+
+  override render(width: number): string[] {
+    const innerWidth = Math.max(42, width - 2);
+    const runningIndex = this.rows.findIndex((row) => row.status === "running");
+    const windowEnd = runningIndex < 0 ? this.rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
+    const visibleRows = this.rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
+    const progressStatus = formatManualPruneProgressStatus(this.rows.map((row) => row.status));
+    const title = this.cancelling
+      ? `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("warning", ` (Cancelling · ${progressStatus})`)}`
+      : `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("dim", ` (${progressStatus})`)}`;
+    const hint = this.cancelling
+      ? this.theme.fg("dim", "Waiting for already-started batches to finish…")
+      : this.theme.fg("dim", "Esc: stop scheduling new batches; in-flight batches will finish");
+    const border = this.theme.fg("border", `┌${"─".repeat(innerWidth)}┐`);
+    const divider = this.theme.fg("border", `├${"─".repeat(innerWidth)}┤`);
+    const bottom = this.theme.fg("border", `└${"─".repeat(innerWidth)}┘`);
+    return [border, this.frameLine(` ${title}`, innerWidth), divider,
+      ...visibleRows.map((row) => this.frameLine(` ${this.rowLine(row)}`, innerWidth)),
+      divider, this.frameLine(` ${hint}`, innerWidth), bottom];
+  }
 }
 
 // ── Command registration ────────────────────────────────────────────────────
@@ -354,7 +405,7 @@ export function registerCommands(
   pi: ExtensionAPI,
   currentConfig: { value: ContextPruneConfig },
   flushPending: (ctx: ExtensionCommandContext, options?: FlushOptions) => Promise<
-    | { ok: true; reason: "flushed" | "skipped-oversized"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
+    | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
     | { ok: false; reason: string; error?: string }
   >,
   capturePendingBatches: (ctx: ExtensionCommandContext) => CapturedBatch[],
@@ -389,6 +440,12 @@ export function registerCommands(
           const config = currentConfig.value;
           const availableModels = ctx.modelRegistry?.getAvailable() ?? [];
 
+          const thresholdValues = [...new Set([...RAW_CHAR_THRESHOLD_PRESETS, config.minRawCharsThreshold])]
+            .sort((a, b) => a - b)
+            .map(String);
+          const concurrencyValues = [...new Set([...MANUAL_PRUNE_CONCURRENCY_PRESETS, config.manualPruneConcurrency])]
+            .sort((a, b) => a - b)
+            .map(String);
           const items: SettingItem[] = [
             {
               id: "enabled",
@@ -469,11 +526,25 @@ export function registerCommands(
               description: remindUnprunedCountDescription(config),
             },
             {
+              id: "minRawCharsThreshold",
+              label: "Min raw chars",
+              values: thresholdValues,
+              currentValue: String(config.minRawCharsThreshold),
+              description: rawCharThresholdDescription(config.minRawCharsThreshold),
+            },
+            {
               id: "batchingMode",
               label: "Batching mode",
               values: BATCHING_MODES.map((m) => m.value),
               currentValue: config.batchingMode,
               description: batchingModeDescription(config.batchingMode),
+            },
+            {
+              id: "manualPruneConcurrency",
+              label: "Manual concurrency",
+              values: concurrencyValues,
+              currentValue: String(config.manualPruneConcurrency),
+              description: manualPruneConcurrencyDescription(config.manualPruneConcurrency),
             },
           ];
 
@@ -524,12 +595,24 @@ export function registerCommands(
               if (pruneTriggerItem) {
                 pruneTriggerItem.description = pruneTriggerDescription(newConfig.pruneOn);
               }
+            } else if (id === "minRawCharsThreshold") {
+              const threshold = parseMinRawCharsThreshold(newValue);
+              if (threshold === null) return;
+              newConfig.minRawCharsThreshold = threshold;
+              const thresholdItem = items.find((item) => item.id === "minRawCharsThreshold");
+              if (thresholdItem) thresholdItem.description = rawCharThresholdDescription(threshold);
             } else if (id === "batchingMode") {
               newConfig.batchingMode = newValue as ContextPruneConfig["batchingMode"];
               const batchingItem = items.find((item) => item.id === "batchingMode");
               if (batchingItem) {
                 batchingItem.description = batchingModeDescription(newConfig.batchingMode);
               }
+            } else if (id === "manualPruneConcurrency") {
+              const concurrency = parseManualPruneConcurrency(newValue);
+              if (concurrency === null) return;
+              newConfig.manualPruneConcurrency = concurrency;
+              const concurrencyItem = items.find((item) => item.id === "manualPruneConcurrency");
+              if (concurrencyItem) concurrencyItem.description = manualPruneConcurrencyDescription(concurrency);
             }
             currentConfig.value = newConfig;
             saveConfig(newConfig);
@@ -594,7 +677,7 @@ export function registerCommands(
             ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
             : "\n  (no summarizer calls yet)";
           ctx.ui.notify(
-            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
+            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min chars: ${cfg.minRawCharsThreshold.toLocaleString()} (${cfg.minRawCharsThreshold === 0 ? "off" : "skip at or below"})\n  concurrency: ${cfg.manualPruneConcurrency} (/pruner now)\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
           );
           break;
         }
@@ -623,11 +706,11 @@ export function registerCommands(
         // ── /pruner stats ──
         case "stats": {
           const s = getStats();
-          if (s.callCount === 0) {
+          if (s.callCount === 0 && s.retryCount === 0 && s.finalFailureCount === 0) {
             ctx.ui.notify("pruner stats: no summarizer calls yet.");
           } else {
             ctx.ui.notify(
-              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`,
+              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}\n  retries:     ${s.retryCount}\n  failed:      ${s.finalFailureCount}\n  failures:    rate-limit ${s.failureCounts["rate-limit"]}, network ${s.failureCounts.network}, provider ${s.failureCounts.provider}, persistence ${s.failureCounts.persistence}, cancelled ${s.failureCounts.cancelled}${formatTheoreticalSavings(s, ctx.model) ? `\n  saved:       ${formatTheoreticalSavings(s, ctx.model)}` : ""}`,
             );
           }
           break;
@@ -727,6 +810,69 @@ export function registerCommands(
           break;
         }
 
+        // ── /pruner manual-concurrency [n] ──
+        case "manual-concurrency": {
+          const concurrencyArg = subArgs[0];
+          if (!concurrencyArg) {
+            ctx.ui.notify(
+              `Manual prune concurrency: ${currentConfig.value.manualPruneConcurrency}\n${manualPruneConcurrencyDescription(currentConfig.value.manualPruneConcurrency)}`,
+              "info",
+            );
+            break;
+          }
+          const concurrency = parseManualPruneConcurrency(concurrencyArg);
+          if (concurrency === null) {
+            ctx.ui.notify(`Invalid concurrency: ${concurrencyArg}. Use an integer from ${MANUAL_PRUNE_CONCURRENCY_MIN} to ${MANUAL_PRUNE_CONCURRENCY_MAX}.`, "error");
+            break;
+          }
+          currentConfig.value = { ...currentConfig.value, manualPruneConcurrency: concurrency };
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(`Manual prune concurrency set to: ${concurrency}`);
+          break;
+        }
+
+        // ── /pruner min-raw-chars [n] ──
+        case "min-raw-chars": {
+          const thresholdArg = subArgs[0];
+          if (!thresholdArg) {
+            ctx.ui.notify(
+              `Min raw chars threshold: ${currentConfig.value.minRawCharsThreshold.toLocaleString()}\n${rawCharThresholdDescription(currentConfig.value.minRawCharsThreshold)}`,
+              "info",
+            );
+            break;
+          }
+          const threshold = parseMinRawCharsThreshold(thresholdArg);
+          if (threshold === null) {
+            ctx.ui.notify("Invalid min raw chars threshold. Use a non-negative integer; 0 disables skipping.", "warning");
+            break;
+          }
+          currentConfig.value = { ...currentConfig.value, minRawCharsThreshold: threshold };
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(`Min raw chars threshold set to: ${threshold.toLocaleString()}\n${rawCharThresholdDescription(threshold)}`);
+          break;
+        }
+        // ── /pruner dry-run ──
+        case "dry-run": {
+          const preview = calculateDryRunPreview(
+            capturePendingBatches(ctx),
+            currentConfig.value.minRawCharsThreshold,
+            getStats(),
+          );
+          if (preview.batchCount === 0) {
+            ctx.ui.notify("pruner dry-run: nothing pending — no batches to summarize", "info");
+            break;
+          }
+          const estimate = preview.estimatedSavingsCharCount === undefined
+            ? "  estimate:    unavailable (no accepted summary history)"
+            : `  estimate:    ~${preview.estimatedSavingsCharCount.toLocaleString()} chars saved; ~${preview.estimatedSummaryCharCount!.toLocaleString()} summary chars`;
+          ctx.ui.notify(
+            `pruner dry-run (no changes made):\n  pending:     ${preview.batchCount} batches, ${preview.toolCallCount} tool calls, ${preview.rawCharCount.toLocaleString()} raw chars\n  candidates:  ${preview.candidateBatchCount} batches, ${preview.candidateToolCallCount} tool calls, ${preview.candidateRawCharCount.toLocaleString()} raw chars\n  threshold:   ${preview.skippedBatchCount} skipped, ${preview.skippedRawCharCount.toLocaleString()} raw chars${preview.skippedBatchCount === 0 ? "" : ` (at or below ${currentConfig.value.minRawCharsThreshold.toLocaleString()})`}\n${estimate}`,
+            "info",
+          );
+          break;
+        }
+
+        // ── /pruner now ──
         // ── /pruner now ──
         case "now": {
           if (!currentConfig.value.enabled) {
@@ -734,39 +880,71 @@ export function registerCommands(
             return;
           }
 
-          // Capture the pending queue first so we can pre-build the widget rows.
+          // Capture the pending queue first so the centered overlay can pre-build its rows.
           const batches = capturePendingBatches(ctx);
           if (batches.length === 0) {
             ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
             break;
           }
 
-          // Open the progress widget above the editor — one row per batch.
-          const { updateRow, clearWidget } = startPrunerWidget(ctx, batches);
+          // A centered overlay owns focus for the duration of manual pruning.
+          // It displays up to sixteen rows and uses Esc for a soft stop.
+          const lifecycle = createManualPruneOverlayLifecycle();
+          let progressOverlay: PruneProgressOverlay | undefined;
+          const progressOverlayPromise = ctx.hasUI
+            ? ctx.ui.custom<void>(
+                (tui, theme, keybindings, done) => {
+                  lifecycle.setClose(() => done(undefined));
+                  progressOverlay = new PruneProgressOverlay(
+                    tui,
+                    theme,
+                    batches,
+                    () => lifecycle.cancel(),
+
+                    (data) => keybindings.matches(data, "tui.select.cancel"),
+                  );
+                  return progressOverlay;
+                },
+                {
+                  overlay: true,
+                  overlayOptions: { width: 80, maxHeight: "80%", anchor: "center" },
+                  onHandle: (handle) => handle.focus(),
+                },
+              )
+            : undefined;
+          const updateRow = (index: number, status: RowStatus, chars?: number, detail?: ManualPruneProgressDetail) =>
+            progressOverlay?.updateRow(index, status, chars, detail);
 
           const result = await flushPending(ctx, {
             previewedBatches: batches,
-            onProgress: (index, _total, _batch, stage) => {
-              if (stage === "start") {
-                updateRow(index, "running", 0);
-              } else if (stage === "done") {
-                updateRow(index, "done");
-              } else {
-                updateRow(index, "skipped");
-              }
+            signal: lifecycle.signal,
+            onProgress: (index, _total, _batch, stage, detail) => {
+              if (stage === "start") updateRow(index, "running", 0, detail);
+              else if (stage === "retry") updateRow(index, "retrying", undefined, detail);
+              else if (stage === "done") updateRow(index, "done", undefined, detail);
+              else if (stage === "failed") updateRow(index, "failed", undefined, detail);
+              else updateRow(index, "skipped", undefined, detail);
             },
             onBatchTextProgress: (index, _total, _batch, receivedChars) => {
               updateRow(index, "running", receivedChars);
             },
           });
 
-          // Remove the widget and restore the normal footer status.
-          clearWidget();
+          lifecycle.close();
+          await progressOverlayPromise;
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";
-            ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, result.reason === "empty" ? "info" : "warning");
+            const message = lifecycle.signal.aborted || result.reason === "cancelled"
+              ? "pruner: cancelled before any batch completed; all work remains pending"
+              : `pruner: nothing flushed — ${result.reason}${suffix}`;
+            ctx.ui.notify(message, result.reason === "empty" ? "info" : "warning");
+            break;
+          }
+          if (result.reason === "cancelled") {
+            const remaining = Math.max(0, batches.length - result.batchCount);
+            ctx.ui.notify(`pruner: cancellation complete — retained ${result.batchCount} completed batch(es); ${remaining} remain pending`, "info");
             break;
           }
 

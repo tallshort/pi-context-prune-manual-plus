@@ -191,7 +191,15 @@ export interface ContextPruneConfig {
    *                     (all turns between two user messages are merged)
    */
   batchingMode: BatchingMode;
+  /** Skip summary calls when a batch has at most this many raw result characters; 0 disables the threshold. */
+  minRawCharsThreshold: number;
+  /** Maximum simultaneous summarizer calls started by `/pruner now` (1–16). */
+  manualPruneConcurrency: number;
 }
+
+export const MANUAL_PRUNE_CONCURRENCY_MIN = 1;
+export const MANUAL_PRUNE_CONCURRENCY_MAX = 16;
+export const DEFAULT_MANUAL_PRUNE_CONCURRENCY = 8;
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
   enabled: false,
@@ -203,6 +211,8 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   remindUnprunedCount: true,
   notifySkipped: true,
   batchingMode: "turn",
+  minRawCharsThreshold: 0,
+  manualPruneConcurrency: DEFAULT_MANUAL_PRUNE_CONCURRENCY,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────
@@ -300,10 +310,20 @@ export interface SummarizerStats {
   totalCost: number;
   /** Number of summarizer LLM calls made */
   callCount: number;
+  /** Raw tool-result characters replaced by accepted summaries */
+  totalPrunedRawChars: number;
+  /** Characters in accepted rendered summaries */
+  totalPrunedSummaryChars: number;
+  /** Automatic retry attempts made for retryable manual failures. */
+  retryCount: number;
+  /** Batches that still failed after their allowed manual retry (or were not retryable). */
+  finalFailureCount: number;
+  /** Terminal failures grouped by a safe, normalized category. */
+  failureCounts: Record<FailureKind, number>;
 }
 
 /** Outcome of the most recent completed prune attempt. */
-export type PruneFrontierOutcome = "summarized" | "skipped-oversized";
+export type PruneFrontierOutcome = "summarized" | "skipped-oversized" | "skipped-small";
 
 /**
  * Snapshot of the last successfully completed prune attempt boundary.
@@ -334,14 +354,35 @@ export interface PruneFrontier {
 }
 
 /**
- * Progress callback invoked by `flushPending` when processing batches sequentially.
- * Only fired when the caller passes `onProgress` in `FlushOptions` (i.e. `/pruner now`).
+ * Progress callback invoked by `flushPending` for every batch lifecycle event.
+ * `/pruner now` uses it to drive its multi-row progress widget while running a
+ * bounded number of summary calls concurrently.
  */
+export type FailureKind = "rate-limit" | "network" | "provider" | "persistence" | "cancelled";
+
+/** Safe, user-displayable failure data; raw provider errors are never persisted. */
+export interface BatchFailure {
+  failureKind: FailureKind;
+  failureMessage: string;
+  retryable: boolean;
+}
+
+/** Per-row runtime detail emitted with manual batch progress. */
+export interface ManualPruneProgressDetail {
+  attempts: number;
+  retryCount: number;
+  failureKind?: FailureKind;
+  failureMessage?: string;
+}
+
+export type ManualPruneProgressStage = "start" | "retry" | "done" | "failed" | "skipped";
+
 export type ProgressCallback = (
   index: number,
   total: number,
   batch: CapturedBatch,
-  stage: "start" | "done" | "skipped",
+  stage: ManualPruneProgressStage,
+  detail?: ManualPruneProgressDetail,
 ) => void;
 
 /** Live text-progress callback for a batch currently being summarized. */
@@ -357,9 +398,8 @@ export interface FlushOptions {
   /** Delivery path: "runtime" uses sendMessage/steer (default); "session" writes directly to session. */
   delivery?: "runtime" | "session";
   /**
-   * When provided, batches are processed sequentially (one LLM call each) instead of
-   * in parallel, and this callback is invoked before/after each batch. Used by
-   * `/pruner now` to drive the multi-row progress overlay.
+   * Receives each batch's start/completion lifecycle event. Used by `/pruner now`
+   * to drive the multi-row progress overlay while summary calls run concurrently.
    */
   onProgress?: ProgressCallback;
   /**
@@ -375,9 +415,8 @@ export interface FlushOptions {
    */
   previewedBatches?: CapturedBatch[];
   /**
-   * Abort signal — when fired the in-flight summarization is cancelled and
-   * `flushPending` returns `{ ok: false, reason: "aborted" }` without advancing
-   * the frontier. All pending batches are restored so the next flush can retry.
+   * When `/pruner now` supplies this signal, cancellation is soft: no more
+   * batches are scheduled, but already-started summaries finish and are kept.
    */
   signal?: AbortSignal;
 }
@@ -391,6 +430,8 @@ export interface SummarizeBatchOptions {
    * batch is treated as aborted (not a summarizer failure).
    */
   signal?: AbortSignal;
+  /** Suppress a global notification when a caller presents the safe error itself. */
+  notifyOnFailure?: boolean;
 }
 
 /** Options for summarizeBatches() when callers want live per-batch text progress. */
@@ -425,3 +466,6 @@ export interface SummarizeResult {
     };
   };
 }
+
+/** Structured result returned when the summarizer did not produce a summary. */
+export interface SummarizeFailure extends BatchFailure {}

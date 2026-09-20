@@ -22,7 +22,7 @@ import { pruneProgressText } from "./progress-text.js";
  */
 type FlushResult =
   | { ok: true; reason: "flushed"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
-  | { ok: true; reason: "skipped-oversized"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
+  | { ok: true; reason: "skipped-oversized" | "skipped-small"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
   | { ok: false; reason: string; error?: string };
 
 function sendToolProgress(
