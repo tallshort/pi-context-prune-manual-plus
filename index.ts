@@ -18,6 +18,8 @@ import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
 import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
 import { runAbortableBounded } from "./src/manual-prune-scheduler.js";
+import { planFlushSettlement } from "./src/flush-settlement.js";
+import { shouldSkipMinRawCharsThreshold } from "./src/min-raw-chars-threshold.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
@@ -198,10 +200,11 @@ export default function (pi: ExtensionAPI) {
       const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
         options.onBatchTextProgress?.(index, total, batch, receivedChars);
       };
-      const isSmallBatch = (batch: CapturedBatch) => {
-        const threshold = currentConfig.value.minRawCharsThreshold;
-        return threshold > 0 && batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0) <= threshold;
-      };
+      const isSmallBatch = (batch: CapturedBatch) =>
+        shouldSkipMinRawCharsThreshold(
+          batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0),
+          currentConfig.value.minRawCharsThreshold,
+        );
       type BatchResult = SummarizeResult | { skippedSmall: true } | null;
 
       // `/pruner now` reports individual row state. Limit its concurrent calls so the
@@ -246,32 +249,28 @@ export default function (pi: ExtensionAPI) {
       }
       const wasCancelled = options.signal?.aborted === true;
 
-      // Process results in order; stop at first null (individual call failure).
-      // Batches before the first failure are persisted; remaining are restored to
-      // pendingBatches so they are retried on the next flush.
+      const settlement = planFlushSettlement(results.map((result) => result !== null), wasCancelled);
       const processedBatches: CapturedBatch[] = [];
+      const processedIndexes = new Set<number>();
       let totalRawCharCount = 0;
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
       const oversizedBatches: CapturedBatch[] = [];
       let smallBatchCount = 0;
-      let firstFailureIndex = -1;
+      let persistenceFailureIndex: number | undefined;
 
-      for (let i = 0; i < batches.length; i++) {
+      for (const i of settlement.processIndexes) {
         const result = results[i];
         const batch = batches[i];
+        if (!result) continue;
         const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-        if (result && "skippedSmall" in result) {
+        if ("skippedSmall" in result) {
           totalRawCharCount += batchRawCharCount;
           totalToolCallCount += batch.toolCalls.length;
           smallBatchCount += 1;
           processedBatches.push(batch);
+          processedIndexes.add(i);
           continue;
-        }
-        if (!result) {
-          if (wasCancelled) continue;
-          firstFailureIndex = i;
-          break;
         }
 
         const summaryRefs = indexer.allocateSummaryRefs(batch);
@@ -306,26 +305,25 @@ export default function (pi: ExtensionAPI) {
             oversizedBatches.push(batch);
           }
         } catch (err) {
-          // Persistence error mid-loop: stop here, restore this and remaining batches.
+          // Persistence error mid-loop: restore this and later batches.
           if (isStaleContextError(err)) {
-            restoreBatches(batches.slice(i));
-            // Advance frontier to what we managed to persist before this point
+            persistenceFailureIndex = i;
             break;
           }
           throw err;
         }
 
         processedBatches.push(batch);
+        processedIndexes.add(i);
       }
 
-      // Restore unprocessed batches (those at and after the first failure)
-      // Restore only the work that did not finish after a manual cancellation.
-      // Completed batches are already indexed below and must not be retried.
-      if (wasCancelled) {
-        restoreBatches(batches.filter((_, index) => results[index] === null));
-      } else if (firstFailureIndex >= 0) {
-        restoreBatches(batches.slice(firstFailureIndex));
+      // Restore planner-selected work plus the failed persistence range, if any.
+      // This preserves retry behavior when session persistence becomes stale.
+      const restoreIndexes = new Set(settlement.restoreIndexes);
+      if (persistenceFailureIndex !== undefined) {
+        for (let i = persistenceFailureIndex; i < batches.length; i++) restoreIndexes.add(i);
       }
+      restoreBatches([...restoreIndexes].sort((a, b) => a - b).map((index) => batches[index]));
 
       if (processedBatches.length === 0) {
         // Nothing was persisted (all calls failed, or cancellation came before
@@ -334,13 +332,11 @@ export default function (pi: ExtensionAPI) {
         return { ok: false, reason: wasCancelled ? "cancelled" : "summarizer-failed" };
       }
 
-      // A cancellation can leave successful later workers behind an unfinished
-      // earlier batch. Only advance the frontier through the contiguous prefix;
-      // the index still prevents later completed batches from being retried.
-      const firstUnfinishedIndex = wasCancelled ? results.findIndex((result) => result === null) : -1;
-      const frontierBatches = wasCancelled && firstUnfinishedIndex >= 0
-        ? batches.slice(0, firstUnfinishedIndex)
-        : processedBatches;
+      // The settlement planner limits the frontier to the contiguous completed
+      // prefix after cancellation. A persistence error can shorten it further.
+      const frontierBatches = settlement.frontierIndexes
+        .filter((index) => processedIndexes.has(index))
+        .map((index) => batches[index]);
       const allOversized = oversizedBatches.length === processedBatches.length;
       const allSmall = smallBatchCount === processedBatches.length;
       if (frontierBatches.length === 0) {
