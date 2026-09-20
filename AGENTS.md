@@ -13,7 +13,7 @@ This repository is a Pi coding-agent extension that prunes tool-call trees befor
 - Keep one active plan per feature; record related fixes and refinements in that plan rather than opening another.
 - Focused fixes, commits, and `TODO.md` updates do not need a plan unless they start a new feature.
 - `TODO.md` is the committed backlog for future work. Add or reprioritize ideas there; open a feature plan only when implementation begins.
-- Mark a `TODO.md` item complete only after the user has manually verified its behavior; implementation and automated checks alone keep it open.
+- Mark an existing `TODO.md` item complete only after the user has manually verified its behavior; implementation and automated checks alone keep it open. Do not add completed work retroactively to `TODO.md`; use feature plans and Git history for that record.
 
 ## Build and tests
 - Run `npm test` for unit tests. New behavior fixes need a regression test when there is a suitable seam.

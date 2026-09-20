@@ -2,10 +2,6 @@
 
 Future improvements that preserve the core context-pruning algorithm.
 
-## Completed
-
-- [x] Verify the focusable `/pruner now` overlay: progress updates, Esc soft cancellation, and automatic closure after processing (manually verified by the user).
-
 ## Reliability and controls
 
 - [ ] Make `/pruner now` concurrency configurable, with provider-limit backoff and automatic throttling after retryable failures.
