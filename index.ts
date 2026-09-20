@@ -19,6 +19,7 @@ import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } 
 import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
 import { runAbortableBounded, runWithOneRetry } from "./src/manual-prune-scheduler.js";
 import { planFlushSettlement } from "./src/flush-settlement.js";
+import { DeferredSummaryCache } from "./src/deferred-summary-cache.js";
 import { shouldSkipMinRawCharsThreshold } from "./src/min-raw-chars-threshold.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
@@ -59,6 +60,10 @@ export default function (pi: ExtensionAPI) {
   // Pending batches — accumulated until the prune trigger fires
   const pendingBatches: CapturedBatch[] = [];
   let isFlushing = false;
+  // Successful batches behind a failed earlier batch remain reusable for this
+  // extension process only. They are never indexed or pruned until settlement
+  // later reaches them contiguously.
+  const deferredSummaries = new DeferredSummaryCache<SummarizeResult>();
 
   type FlushResult =
     | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
@@ -222,6 +227,12 @@ export default function (pi: ExtensionAPI) {
               options.onProgress!(index, batches.length, batch, "skipped");
               return { skippedSmall: true as const };
             }
+            const cached = deferredSummaries.get(batch);
+            if (cached) {
+              options.onProgress!(index, batches.length, batch, "start", { attempts: 0, retryCount: 0 });
+              options.onProgress!(index, batches.length, batch, "done", { attempts: 0, retryCount: 0 });
+              return cached;
+            }
             let attempts = 0;
             const attempt = async () => {
               attempts += 1;
@@ -350,6 +361,18 @@ export default function (pi: ExtensionAPI) {
       // Restore planner-selected work plus the failed persistence range, if any.
       // This preserves retry behavior when session persistence becomes stale.
       const restoreIndexes = new Set(settlement.restoreIndexes);
+      // Keep provider-successful manual batches behind a hole for a later
+      // contiguous settlement. The cache is process-local and is cleared when
+      // session state is reconstructed.
+      if (options.onProgress) {
+        for (const index of restoreIndexes) {
+          const result = results[index];
+          if (result && !isFailure(result) && !("skippedSmall" in result)) {
+            deferredSummaries.set(batches[index], result);
+          }
+        }
+      }
+      for (const index of processedIndexes) deferredSummaries.delete(batches[index]);
       if (persistenceFailureIndex !== undefined) {
         for (let i = persistenceFailureIndex; i < batches.length; i++) restoreIndexes.add(i);
       }
@@ -500,6 +523,7 @@ export default function (pi: ExtensionAPI) {
 
     // Clear any batches queued before the session reload
     pendingBatches.length = 0;
+    deferredSummaries.clear();
 
     // Update footer status
     setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
@@ -522,6 +546,7 @@ export default function (pi: ExtensionAPI) {
     frontier.reconstructFromSession(ctx);
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
+    deferredSummaries.clear();
   });
 
   // ── turn_end: capture batch, flush immediately or queue ──────────────────
