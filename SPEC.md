@@ -39,6 +39,7 @@ When scanning a session branch:
 
 A flush snapshots the eligible batches before awaiting model work and prevents concurrent flushes.
 
+`/pruner dry-run` may use the same capture and raw-character threshold rules to report pending candidates, but it is not a flush: it must not call a provider or write summaries, index records, statistics, or frontier state. Its savings estimate is derived only from already accepted historical summary compression and is unavailable without that history.
 For each batch:
 
 1. apply the configured raw-character threshold, if enabled;

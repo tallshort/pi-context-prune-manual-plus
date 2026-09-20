@@ -18,6 +18,7 @@ import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
 import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput } from "./manual-prune-scheduler.js";
+import { calculateDryRunPreview } from "./dry-run.js";
 
 /**
  * Wraps a SettingsList with a border + title, delegating all input handling
@@ -84,6 +85,7 @@ const SUBCOMMANDS = [
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
   { value: "tree",    label: "tree      — browse pruned tool calls in a foldable tree" },
+  { value: "dry-run", label: "dry-run   — preview pending work without changing session state" },
   { value: "now",     label: "now       — flush pending tool calls with a focusable progress overlay" },
   { value: "min-raw-chars", label: "min-raw-chars — show or set the raw-character skip threshold" },
   { value: "help",    label: "help      — show this help" },
@@ -217,6 +219,7 @@ Usage:
   /pruner min-raw-chars <n>               Skip batches with at most n raw result characters (0 disables)
   /pruner stats                            Show cumulative summarizer token/cost stats
   /pruner tree                             Browse pruned tool calls in a foldable tree (Ctrl-O opens selected summary)
+  /pruner dry-run                          Preview pending candidates and historical savings estimate without changing session state
   /pruner now                              Flush pending tool calls immediately (Esc stops scheduling new batches; running ones finish and are retained)
   /pruner help                             Show this help
 
@@ -794,7 +797,28 @@ export function registerCommands(
           ctx.ui.notify(`Min raw chars threshold set to: ${threshold.toLocaleString()}\n${rawCharThresholdDescription(threshold)}`);
           break;
         }
+        // ── /pruner dry-run ──
+        case "dry-run": {
+          const preview = calculateDryRunPreview(
+            capturePendingBatches(ctx),
+            currentConfig.value.minRawCharsThreshold,
+            getStats(),
+          );
+          if (preview.batchCount === 0) {
+            ctx.ui.notify("pruner dry-run: nothing pending — no batches to summarize", "info");
+            break;
+          }
+          const estimate = preview.estimatedSavingsCharCount === undefined
+            ? "  estimate:    unavailable (no accepted summary history)"
+            : `  estimate:    ~${preview.estimatedSavingsCharCount.toLocaleString()} chars saved; ~${preview.estimatedSummaryCharCount!.toLocaleString()} summary chars`;
+          ctx.ui.notify(
+            `pruner dry-run (no changes made):\n  pending:     ${preview.batchCount} batches, ${preview.toolCallCount} tool calls, ${preview.rawCharCount.toLocaleString()} raw chars\n  candidates:  ${preview.candidateBatchCount} batches, ${preview.candidateToolCallCount} tool calls, ${preview.candidateRawCharCount.toLocaleString()} raw chars\n  threshold:   ${preview.skippedBatchCount} skipped, ${preview.skippedRawCharCount.toLocaleString()} raw chars${preview.skippedBatchCount === 0 ? "" : ` (at or below ${currentConfig.value.minRawCharsThreshold.toLocaleString()})`}\n${estimate}`,
+            "info",
+          );
+          break;
+        }
 
+        // ── /pruner now ──
         // ── /pruner now ──
         case "now": {
           if (!currentConfig.value.enabled) {
