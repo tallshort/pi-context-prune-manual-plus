@@ -9,9 +9,36 @@ export class ProviderRateLimitGate {
   constructor(private readonly now: () => number = Date.now) {}
 
   remainingMs(): number {
-    const remaining = Math.max(0, this.blockedUntil - this.now());
-    if (remaining === 0) this.consecutiveRateLimits = 0;
-    return remaining;
+    return Math.max(0, this.blockedUntil - this.now());
+  }
+
+  recordSuccess(): void {
+    this.consecutiveRateLimits = 0;
+  }
+
+  async waitForCooldown(
+    signal?: AbortSignal,
+    onWaiting?: (remainingMs: number) => void,
+  ): Promise<boolean> {
+    while (!signal?.aborted) {
+      const remaining = this.remainingMs();
+      if (remaining === 0) return true;
+      onWaiting?.(remaining);
+      await new Promise<void>((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, Math.min(remaining, 1_000));
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
+    }
+    return false;
   }
 
   recordRateLimit(): void {

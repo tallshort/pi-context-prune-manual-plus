@@ -16,7 +16,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
-import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
+import { summarizeBatch, summarizeBatches, waitForSummarizerCooldown } from "./src/summarizer.js";
 import { runAbortableBounded, runWithOneRetry } from "./src/manual-prune-scheduler.js";
 import { planFlushSettlement } from "./src/flush-settlement.js";
 import { DeferredSummaryCache } from "./src/deferred-summary-cache.js";
@@ -245,17 +245,24 @@ export default function (pi: ExtensionAPI) {
                 onTextProgress: (receivedChars) => reportBatchTextProgress(index, batches.length, batch, receivedChars),
               });
             };
-            const retry = await runWithOneRetry(attempt, (result) => {
+            const retry = await runWithOneRetry(attempt, async (result) => {
               if (!isFailure(result) || !result.retryable || options.signal?.aborted) return false;
-              statsAccum.addRetry();
               options.onProgress!(index, batches.length, batch, "retry", {
                 attempts: 1,
                 retryCount: 1,
                 failureKind: result.failureKind,
                 failureMessage: result.failureMessage,
               });
-              return true;
-            });
+              if (result.failureKind !== "rate-limit") return true;
+              return waitForSummarizerCooldown(options.signal, (remainingMs) => {
+                options.onProgress!(index, batches.length, batch, "retry", {
+                  attempts: 1,
+                  retryCount: 1,
+                  failureKind: result.failureKind,
+                  failureMessage: `rate limited — retrying in ${Math.ceil(remainingMs / 1_000)}s`,
+                });
+              });
+            }, options.signal, () => statsAccum.addRetry());
             const result = retry.value;
             if (isFailure(result)) {
               statsAccum.addFinalFailure(result.failureKind);
@@ -296,6 +303,7 @@ export default function (pi: ExtensionAPI) {
       let totalRawCharCount = 0;
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
+      const batchMetrics = new Map<number, { toolCallCount: number; rawCharCount: number; summaryCharCount: number; small: boolean; oversized: boolean }>();
       const oversizedBatches: CapturedBatch[] = [];
       let smallBatchCount = 0;
       let persistenceFailureIndex: number | undefined;
@@ -309,6 +317,7 @@ export default function (pi: ExtensionAPI) {
           totalRawCharCount += batchRawCharCount;
           totalToolCallCount += batch.toolCalls.length;
           smallBatchCount += 1;
+          batchMetrics.set(i, { toolCallCount: batch.toolCalls.length, rawCharCount: batchRawCharCount, summaryCharCount: 0, small: true, oversized: false });
           processedBatches.push(batch);
           processedIndexes.add(i);
           continue;
@@ -321,7 +330,7 @@ export default function (pi: ExtensionAPI) {
         totalRawCharCount += batchRawCharCount;
         totalSummaryCharCount += summaryText.length;
         totalToolCallCount += batch.toolCalls.length;
-
+        batchMetrics.set(i, { toolCallCount: batch.toolCalls.length, rawCharCount: batchRawCharCount, summaryCharCount: summaryText.length, small: false, oversized: shouldSkipOversized });
         const batchDetails = makeSummaryDetails(batch, summaryRefs);
 
         try {
@@ -395,8 +404,10 @@ export default function (pi: ExtensionAPI) {
       const frontierBatches = settlement.frontierIndexes
         .filter((index) => processedIndexes.has(index))
         .map((index) => batches[index]);
-      const allOversized = oversizedBatches.length === processedBatches.length;
-      const allSmall = smallBatchCount === processedBatches.length;
+      const frontierMetrics = settlement.frontierIndexes
+        .filter((index) => processedIndexes.has(index))
+        .map((index) => batchMetrics.get(index)!)
+        .reduce((totals, metric) => ({ toolCallCount: totals.toolCallCount + metric.toolCallCount, rawCharCount: totals.rawCharCount + metric.rawCharCount, summaryCharCount: totals.summaryCharCount + metric.summaryCharCount, allSmall: totals.allSmall && metric.small, allOversized: totals.allOversized && metric.oversized }), { toolCallCount: 0, rawCharCount: 0, summaryCharCount: 0, allSmall: true, allOversized: true });
       if (frontierBatches.length === 0) {
         // Completed batches may be indexed behind a cancellation hole. Their
         // frontier cannot advance yet, but their cumulative stats are durable.
@@ -424,10 +435,10 @@ export default function (pi: ExtensionAPI) {
         lastAttemptedTurnIndex: lastBatch.turnIndex,
         lastAttemptedTimestamp: lastBatch.timestamp,
         attemptedBatchCount: frontierBatches.length,
-        attemptedToolCallCount: totalToolCallCount,
-        rawCharCount: totalRawCharCount,
-        summaryCharCount: totalSummaryCharCount,
-        outcome: allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "summarized",
+        attemptedToolCallCount: frontierMetrics.toolCallCount,
+        rawCharCount: frontierMetrics.rawCharCount,
+        summaryCharCount: frontierMetrics.summaryCharCount,
+        outcome: frontierMetrics.allSmall ? "skipped-small" : frontierMetrics.allOversized ? "skipped-oversized" : "summarized",
       };
 
       try {
@@ -466,7 +477,7 @@ export default function (pi: ExtensionAPI) {
 
       return {
         ok: true,
-        reason: wasCancelled ? "cancelled" : allSmall ? "skipped-small" : allOversized ? "skipped-oversized" : "flushed",
+        reason: wasCancelled ? "cancelled" : smallBatchCount === processedBatches.length ? "skipped-small" : oversizedBatches.length === processedBatches.length ? "skipped-oversized" : "flushed",
         batchCount: processedBatches.length,
         toolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,

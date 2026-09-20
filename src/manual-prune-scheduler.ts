@@ -71,12 +71,16 @@ export async function runAbortableBounded<T, R>(
 /** Runs one attempt, then at most one more when its result is retryable. */
 export async function runWithOneRetry<T>(
   run: () => Promise<T>,
-  shouldRetry: (result: T) => boolean,
+  shouldRetry: (result: T) => boolean | Promise<boolean>,
+  signal?: AbortSignal,
+  onRetryStart?: () => void,
 ): Promise<{ value: T; attempts: number; retryCount: number }> {
   const first = await run();
-  if (!shouldRetry(first)) return { value: first, attempts: 1, retryCount: 0 };
+  if (!(await shouldRetry(first))) return { value: first, attempts: 1, retryCount: 0 };
   // Yield once so the retrying row can render before its second request starts.
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  if (signal?.aborted) return { value: first, attempts: 1, retryCount: 0 };
+  onRetryStart?.();
   const second = await run();
   return { value: second, attempts: 2, retryCount: 1 };
 }

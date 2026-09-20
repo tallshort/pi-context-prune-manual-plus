@@ -13,6 +13,13 @@ import { serializeBatchForSummarizer } from "./batch-capture.js";
 import { ProviderRateLimitGate } from "./provider-rate-limit-gate.js";
 
 const rateLimitGate = new ProviderRateLimitGate();
+
+export function waitForSummarizerCooldown(
+  signal?: AbortSignal,
+  onWaiting?: (remainingMs: number) => void,
+): Promise<boolean> {
+  return rateLimitGate.waitForCooldown(signal, onWaiting);
+}
 const SYSTEM_PROMPT = `You are summarizing a batch of tool calls made by an AI coding assistant.
 For each tool call provide:
 - Tool name and a one-sentence description of what it did
@@ -200,6 +207,7 @@ export async function summarizeBatch(
       .map((c: any) => c.text)
       .join("\n");
 
+    rateLimitGate.recordSuccess();
     return {
       summaryText: llmText,
       usage: response.usage,
