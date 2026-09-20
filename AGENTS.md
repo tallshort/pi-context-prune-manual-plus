@@ -17,6 +17,7 @@ This repository is a Pi coding-agent extension that prunes tool-call trees befor
 
 ## Build and tests
 - Run `npm test` for unit tests. New behavior fixes need a regression test when there is a suitable seam.
+- For plan-driven feature work, use TDD with a small set of representative positive and negative-path unit tests before implementation. Optimize for fast feedback, not exhaustive coverage.
 - Run `npm run build` after extension source changes; it regenerates the ignored local `dist/` bundle used by Pi.
 - Run `npm run check` before release/package validation.
 - Keep `dist/` untracked; commit TypeScript source, tests, docs, and plans instead.
