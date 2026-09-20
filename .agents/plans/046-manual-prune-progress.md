@@ -19,6 +19,13 @@ steps:
       - "- [x] step 3: cover dynamic completed-batch title progress"
       - "- [x] step 4: cover normal scheduling and overlay cancellation/close lifecycle"
       - "- [x] step 5: add command-level integration coverage and organize test layers"
+      - "- [x] step 6: define structured retryable failure classification and non-persistent overlay failure state"
+  - phase: retry-and-failure-visibility
+    steps:
+      - "- [x] step 1: add red unit and integration-style tests for one retry, terminal failures, stats, and themed overlay states"
+      - "- [x] step 2: implement a single retry for retryable manual summarizer/provider failures and persist aggregate stats only"
+      - "- [x] step 3: document the retry contract in README and SPEC"
+      - "- [x] step 4: run tests, bundle validation, and diff validation"
 ---
 
 # 046-manual-prune-progress
@@ -39,3 +46,10 @@ steps:
 - [x] step 3: cover dynamic completed-batch title progress
 - [x] step 4: cover normal scheduling and overlay cancellation/close lifecycle
 - [x] step 5: add command-level integration coverage and organize test layers
+- [x] step 6: define structured retryable failure classification and non-persistent overlay failure state
+
+## Phase 4 — Retry, failure visibility, and validation
+- [x] step 1: add red unit and integration-style tests for one retry, terminal failures, stats, and themed overlay states
+- [x] step 2: implement a single retry for retryable manual summarizer/provider failures and persist aggregate stats only
+- [x] step 3: document the retry contract in README and SPEC
+- [x] step 4: run tests, bundle validation, and diff validation

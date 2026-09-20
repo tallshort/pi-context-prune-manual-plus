@@ -3,6 +3,7 @@ import {
   type SummarizerStats,
   type CapturedBatch,
   type FlushOptions,
+  type ManualPruneProgressDetail,
   PRUNE_ON_MODES,
   BATCHING_MODES,
   STATUS_WIDGET_ID,
@@ -252,7 +253,7 @@ Settings are saved to ~/.pi/agent/context-prune/settings.json`;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const SPINNER_INTERVAL_MS = 120;
 
-type RowStatus = "pending" | "running" | "done" | "skipped";
+type RowStatus = "pending" | "running" | "retrying" | "done" | "failed" | "skipped";
 
 interface WidgetRow {
   label: string;
@@ -260,6 +261,10 @@ interface WidgetRow {
   rawChars: number;
   status: RowStatus;
   receivedChars: number;
+  attempts: number;
+  retryCount: number;
+  failureKind?: ManualPruneProgressDetail["failureKind"];
+  failureMessage?: string;
 }
 
 const MAX_PROGRESS_ROWS = 16;
@@ -288,14 +293,22 @@ class PruneProgressOverlay extends Container implements Focusable {
       rawChars: batch.toolCalls.reduce((sum, toolCall) => sum + toolCall.resultText.length, 0),
       status: "pending",
       receivedChars: 0,
+      attempts: 0,
+      retryCount: 0,
     }));
   }
 
-  updateRow(index: number, status: RowStatus, chars?: number): void {
+  updateRow(index: number, status: RowStatus, chars?: number, detail?: ManualPruneProgressDetail): void {
     const row = this.rows[index];
     if (!row) return;
     row.status = status;
     if (chars !== undefined) row.receivedChars = chars;
+    if (detail) {
+      row.attempts = detail.attempts;
+      row.retryCount = detail.retryCount;
+      row.failureKind = detail.failureKind;
+      row.failureMessage = detail.failureMessage;
+    }
     this.syncAnimation();
     this.tui.requestRender();
   }
@@ -314,7 +327,7 @@ class PruneProgressOverlay extends Container implements Focusable {
   }
 
   private syncAnimation(): void {
-    const hasRunningRows = this.rows.some((row) => row.status === "running");
+    const hasRunningRows = this.rows.some((row) => row.status === "running" || row.status === "retrying");
     if (hasRunningRows && !this.animationTimer) {
       this.animationTimer = setInterval(() => this.tui.requestRender(), SPINNER_INTERVAL_MS);
       this.animationTimer.unref?.();
@@ -336,7 +349,11 @@ class PruneProgressOverlay extends Container implements Focusable {
       const chars = row.receivedChars > 0 ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}` : "";
       return `${this.theme.fg("accent", frame)}${this.theme.fg("text", ` ${row.label} · ${count}${chars}`)}`;
     }
+    if (row.status === "retrying") {
+      return `${this.theme.fg("accent", "↻")}${this.theme.fg("text", ` ${row.label} · retry ${row.retryCount}/1 · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;
+    }
     if (row.status === "done") return `${this.theme.fg("success", "✓")}${this.theme.fg("text", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
+    if (row.status === "failed") return `${this.theme.fg("error", "✗")}${this.theme.fg("text", ` ${row.label} · failed after ${row.attempts} attempt${row.attempts === 1 ? "" : "s"} · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;
     if (row.status === "skipped") return this.theme.fg("text", `⚠ ${row.label} · ${count} · skipped`);
     return this.theme.fg("text", `○ ${row.label} · ${count} · pending`);
   }
@@ -653,11 +670,11 @@ export function registerCommands(
         // ── /pruner stats ──
         case "stats": {
           const s = getStats();
-          if (s.callCount === 0) {
+          if (s.callCount === 0 && s.retryCount === 0 && s.finalFailureCount === 0) {
             ctx.ui.notify("pruner stats: no summarizer calls yet.");
           } else {
             ctx.ui.notify(
-              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}${formatTheoreticalSavings(s, ctx.model) ? `\n  saved:       ${formatTheoreticalSavings(s, ctx.model)}` : ""}`,
+              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}\n  retries:     ${s.retryCount}\n  failed:      ${s.finalFailureCount}\n  failures:    rate-limit ${s.failureCounts["rate-limit"]}, network ${s.failureCounts.network}, provider ${s.failureCounts.provider}, persistence ${s.failureCounts.persistence}, cancelled ${s.failureCounts.cancelled}${formatTheoreticalSavings(s, ctx.model) ? `\n  saved:       ${formatTheoreticalSavings(s, ctx.model)}` : ""}`,
             );
           }
           break;
@@ -817,20 +834,18 @@ export function registerCommands(
                 },
               )
             : undefined;
-          const updateRow = (index: number, status: RowStatus, chars?: number) =>
-            progressOverlay?.updateRow(index, status, chars);
+          const updateRow = (index: number, status: RowStatus, chars?: number, detail?: ManualPruneProgressDetail) =>
+            progressOverlay?.updateRow(index, status, chars, detail);
 
           const result = await flushPending(ctx, {
             previewedBatches: batches,
             signal: lifecycle.signal,
-            onProgress: (index, _total, _batch, stage) => {
-              if (stage === "start") {
-                updateRow(index, "running", 0);
-              } else if (stage === "done") {
-                updateRow(index, "done");
-              } else {
-                updateRow(index, "skipped");
-              }
+            onProgress: (index, _total, _batch, stage, detail) => {
+              if (stage === "start") updateRow(index, "running", 0, detail);
+              else if (stage === "retry") updateRow(index, "retrying", undefined, detail);
+              else if (stage === "done") updateRow(index, "done", undefined, detail);
+              else if (stage === "failed") updateRow(index, "failed", undefined, detail);
+              else updateRow(index, "skipped", undefined, detail);
             },
             onBatchTextProgress: (index, _total, _batch, receivedChars) => {
               updateRow(index, "running", receivedChars);

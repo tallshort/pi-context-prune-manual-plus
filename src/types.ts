@@ -307,6 +307,12 @@ export interface SummarizerStats {
   totalPrunedRawChars: number;
   /** Characters in accepted rendered summaries */
   totalPrunedSummaryChars: number;
+  /** Automatic retry attempts made for retryable manual failures. */
+  retryCount: number;
+  /** Batches that still failed after their allowed manual retry (or were not retryable). */
+  finalFailureCount: number;
+  /** Terminal failures grouped by a safe, normalized category. */
+  failureCounts: Record<FailureKind, number>;
 }
 
 /** Outcome of the most recent completed prune attempt. */
@@ -345,11 +351,31 @@ export interface PruneFrontier {
  * `/pruner now` uses it to drive its multi-row progress widget while running a
  * bounded number of summary calls concurrently.
  */
+export type FailureKind = "rate-limit" | "network" | "provider" | "persistence" | "cancelled";
+
+/** Safe, user-displayable failure data; raw provider errors are never persisted. */
+export interface BatchFailure {
+  failureKind: FailureKind;
+  failureMessage: string;
+  retryable: boolean;
+}
+
+/** Per-row runtime detail emitted with manual batch progress. */
+export interface ManualPruneProgressDetail {
+  attempts: number;
+  retryCount: number;
+  failureKind?: FailureKind;
+  failureMessage?: string;
+}
+
+export type ManualPruneProgressStage = "start" | "retry" | "done" | "failed" | "skipped";
+
 export type ProgressCallback = (
   index: number,
   total: number,
   batch: CapturedBatch,
-  stage: "start" | "done" | "skipped",
+  stage: ManualPruneProgressStage,
+  detail?: ManualPruneProgressDetail,
 ) => void;
 
 /** Live text-progress callback for a batch currently being summarized. */
@@ -397,6 +423,8 @@ export interface SummarizeBatchOptions {
    * batch is treated as aborted (not a summarizer failure).
    */
   signal?: AbortSignal;
+  /** Suppress a global notification when a caller presents the safe error itself. */
+  notifyOnFailure?: boolean;
 }
 
 /** Options for summarizeBatches() when callers want live per-batch text progress. */
@@ -431,3 +459,6 @@ export interface SummarizeResult {
     };
   };
 }
+
+/** Structured result returned when the summarizer did not produce a summary. */
+export interface SummarizeFailure extends BatchFailure {}

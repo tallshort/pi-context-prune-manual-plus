@@ -109,4 +109,37 @@ describe("/pruner now", () => {
       "info",
     );
   });
+  it("renders retry and terminal failure states with the error icon color", async () => {
+    const command = { register: vi.fn() };
+    const rendered = { requestRender: vi.fn() };
+    const theme = { fg: (color: string, text: string) => `<${color}>${text}</${color}>` };
+    let overlay: { render(width: number): string[] } | undefined;
+    let release: (() => void) | undefined;
+    const ui = {
+      custom: vi.fn((factory: any, options: any) => new Promise<void>((resolve) => {
+        overlay = factory(rendered, theme, { matches: () => false }, resolve);
+        options.onHandle({ focus: vi.fn() });
+      })),
+      notify: vi.fn(), setStatus: vi.fn(), theme,
+    };
+    const ctx = { hasUI: true, ui };
+    const batches: CapturedBatch[] = [{ turnIndex: 0, timestamp: 0, assistantText: "", toolCalls: [{ toolCallId: "call-1", toolName: "read", args: {}, resultText: "raw", isError: false }] }];
+    const flushPending = vi.fn(async (_ctx: unknown, options?: FlushOptions) => {
+      options?.onProgress?.(0, 1, batches[0], "start", { attempts: 1, retryCount: 0 });
+      options?.onProgress?.(0, 1, batches[0], "retry", { attempts: 1, retryCount: 1, failureKind: "rate-limit", failureMessage: "rate limited" });
+      await new Promise<void>((resolve) => { release = resolve; });
+      options?.onProgress?.(0, 1, batches[0], "failed", { attempts: 2, retryCount: 1, failureKind: "network", failureMessage: "network error" });
+      return { ok: false as const, reason: "summarizer-failed" };
+    });
+
+    registerCommands({ registerCommand: command.register, registerMessageRenderer: vi.fn() } as any, { value: { ...DEFAULT_CONFIG, enabled: true } }, flushPending as any, () => batches, vi.fn(), () => ({ totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0, callCount: 0, totalPrunedRawChars: 0, totalPrunedSummaryChars: 0, retryCount: 0, finalFailureCount: 0, failureCounts: { "rate-limit": 0, network: 0, provider: 0, persistence: 0, cancelled: 0 } }), {} as any);
+    const handler = command.register.mock.calls[0][1].handler("now", ctx);
+    await vi.waitFor(() => expect(overlay).toBeDefined());
+    expect(overlay!.render(100).join("\n")).toContain("<accent>↻</accent><text> Batch 1/1 · retry 1/1 · rate limited");
+
+    release!();
+    await handler;
+    const output = overlay!.render(100).join("\n");
+    expect(output).toContain("<error>✗</error><text> Batch 1/1 · failed after 2 attempts · network error");
+  });
 });

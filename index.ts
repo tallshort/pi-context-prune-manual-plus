@@ -17,7 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
 import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
-import { runAbortableBounded } from "./src/manual-prune-scheduler.js";
+import { runAbortableBounded, runWithOneRetry } from "./src/manual-prune-scheduler.js";
 import { planFlushSettlement } from "./src/flush-settlement.js";
 import { shouldSkipMinRawCharsThreshold } from "./src/min-raw-chars-threshold.js";
 import { ToolCallIndexer } from "./src/indexer.js";
@@ -26,7 +26,7 @@ import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminde
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, pruneStatusText, setPruneStatusWidget } from "./src/commands.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
-import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions, SummarizeResult } from "./src/types.js";
+import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions, SummarizeResult, SummarizeFailure } from "./src/types.js";
 import {
   DEFAULT_CONFIG,
   CONTEXT_PRUNE_TOOL_NAME,
@@ -205,8 +205,9 @@ export default function (pi: ExtensionAPI) {
           batch.toolCalls.reduce((total, toolCall) => total + toolCall.resultText.length, 0),
           currentConfig.value.minRawCharsThreshold,
         );
-      type BatchResult = SummarizeResult | { skippedSmall: true } | null;
-
+      type BatchResult = SummarizeResult | SummarizeFailure | { skippedSmall: true } | null;
+      const isFailure = (result: BatchResult): result is SummarizeFailure =>
+        result !== null && "failureKind" in result;
       // `/pruner now` reports individual row state. Limit its concurrent calls so the
       // widget remains responsive without overwhelming the summarizer provider.
       // Other flush paths run fully parallel below.
@@ -221,16 +222,41 @@ export default function (pi: ExtensionAPI) {
               options.onProgress!(index, batches.length, batch, "skipped");
               return { skippedSmall: true as const };
             }
-            options.onProgress!(index, batches.length, batch, "start");
-            const result = await summarizeBatch(batch, currentConfig.value, ctx, {
-              // Manual cancellation is soft: finish already-started calls so their
-              // completed summaries can still be indexed, but do not start another.
-              signal: undefined,
-              onTextProgress: (receivedChars) => {
-                reportBatchTextProgress(index, batches.length, batch, receivedChars);
-              },
+            let attempts = 0;
+            const attempt = async () => {
+              attempts += 1;
+              options.onProgress!(index, batches.length, batch, "start", { attempts, retryCount: attempts - 1 });
+              return summarizeBatch(batch, currentConfig.value, ctx, {
+                // Manual cancellation is soft: finish already-started calls so their
+                // completed summaries can still be indexed, but do not start another.
+                signal: undefined,
+                notifyOnFailure: false,
+                onTextProgress: (receivedChars) => reportBatchTextProgress(index, batches.length, batch, receivedChars),
+              });
+            };
+            const retry = await runWithOneRetry(attempt, (result) => {
+              if (!isFailure(result) || !result.retryable || options.signal?.aborted) return false;
+              statsAccum.addRetry();
+              options.onProgress!(index, batches.length, batch, "retry", {
+                attempts: 1,
+                retryCount: 1,
+                failureKind: result.failureKind,
+                failureMessage: result.failureMessage,
+              });
+              return true;
             });
-            options.onProgress!(index, batches.length, batch, result ? "done" : "skipped");
+            const result = retry.value;
+            if (isFailure(result)) {
+              statsAccum.addFinalFailure(result.failureKind);
+              options.onProgress!(index, batches.length, batch, "failed", {
+                attempts: retry.attempts,
+                retryCount: retry.retryCount,
+                failureKind: result.failureKind,
+                failureMessage: result.failureMessage,
+              });
+            } else {
+              options.onProgress!(index, batches.length, batch, "done", { attempts: retry.attempts, retryCount: retry.retryCount });
+            }
             return result;
           },
         );
@@ -249,7 +275,11 @@ export default function (pi: ExtensionAPI) {
       }
       const wasCancelled = options.signal?.aborted === true;
 
-      const settlement = planFlushSettlement(results.map((result) => result !== null), wasCancelled);
+      // Structured failures are restored below; record aggregate categories only.
+      if (!options.onProgress) {
+        for (const result of results) if (isFailure(result)) statsAccum.addFinalFailure(result.failureKind);
+      }
+      const settlement = planFlushSettlement(results.map((result) => result !== null && !isFailure(result)), wasCancelled);
       const processedBatches: CapturedBatch[] = [];
       const processedIndexes = new Set<number>();
       let totalRawCharCount = 0;
@@ -262,7 +292,7 @@ export default function (pi: ExtensionAPI) {
       for (const i of settlement.processIndexes) {
         const result = results[i];
         const batch = batches[i];
-        if (!result) continue;
+        if (!result || isFailure(result)) continue;
         const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
         if ("skippedSmall" in result) {
           totalRawCharCount += batchRawCharCount;
@@ -326,8 +356,13 @@ export default function (pi: ExtensionAPI) {
       restoreBatches([...restoreIndexes].sort((a, b) => a - b).map((index) => batches[index]));
 
       if (processedBatches.length === 0) {
-        // Nothing was persisted (all calls failed, or cancellation came before
-        // any in-flight batch completed).
+        // Retry/failure counters are durable even when no batch produced a summary.
+        try {
+          if (delivery === "runtime") statsAccum.persist(pi);
+          else appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
+        } catch {
+          // Session/index persistence failures stay pending and are never retried here.
+        }
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
         return { ok: false, reason: wasCancelled ? "cancelled" : "summarizer-failed" };
       }

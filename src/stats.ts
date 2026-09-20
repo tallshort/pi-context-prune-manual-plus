@@ -35,6 +35,9 @@ export class StatsAccumulator {
     totalPrunedRawChars: 0,
     totalPrunedSummaryChars: 0,
     callCount: 0,
+    retryCount: 0,
+    finalFailureCount: 0,
+    failureCounts: { "rate-limit": 0, network: 0, provider: 0, persistence: 0, cancelled: 0 },
   };
 
   /** Add usage data from one summarizer LLM call. */
@@ -51,6 +54,17 @@ export class StatsAccumulator {
     this.stats.totalPrunedSummaryChars += summaryChars;
   }
 
+  /** Record an automatic retry caused by a retryable manual summarizer failure. */
+  addRetry(): void {
+    this.stats.retryCount += 1;
+  }
+
+  /** Record a terminal batch failure without retaining its raw error text. */
+  addFinalFailure(kind: keyof SummarizerStats["failureCounts"]): void {
+    this.stats.finalFailureCount += 1;
+    this.stats.failureCounts[kind] += 1;
+  }
+
   /** Return a snapshot of the current cumulative stats. */
   getStats(): SummarizerStats {
     return { ...this.stats };
@@ -65,6 +79,9 @@ export class StatsAccumulator {
       totalPrunedRawChars: 0,
       totalPrunedSummaryChars: 0,
       callCount: 0,
+      retryCount: 0,
+      finalFailureCount: 0,
+      failureCounts: { "rate-limit": 0, network: 0, provider: 0, persistence: 0, cancelled: 0 },
     };
   }
 
@@ -82,6 +99,15 @@ export class StatsAccumulator {
       totalPrunedRawChars: data.totalPrunedRawChars ?? 0,
       totalPrunedSummaryChars: data.totalPrunedSummaryChars ?? 0,
       callCount: data.callCount ?? 0,
+      retryCount: data.retryCount ?? 0,
+      finalFailureCount: data.finalFailureCount ?? 0,
+      failureCounts: {
+        "rate-limit": data.failureCounts?.["rate-limit"] ?? 0,
+        network: data.failureCounts?.network ?? 0,
+        provider: data.failureCounts?.provider ?? 0,
+        persistence: data.failureCounts?.persistence ?? 0,
+        cancelled: data.failureCounts?.cancelled ?? 0,
+      },
     };
   }
 

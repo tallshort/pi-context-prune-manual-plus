@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded } from "../../src/manual-prune-scheduler.js";
+import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded, runWithOneRetry } from "../../src/manual-prune-scheduler.js";
 
 describe("manual prune cancellation", () => {
   it("recognizes only Pi's configured cancel key", () => {
@@ -65,5 +65,33 @@ describe("manual prune cancellation", () => {
 
     await expect(resultsPromise).resolves.toEqual([0, 1, 2, 3, 4, 5, 6, 7, null, null, null, null]);
     expect(waitForStart).toHaveBeenCalledTimes(8);
+  });
+  it("retries a retryable failure exactly once and preserves its retry count", async () => {
+    let calls = 0;
+    const result = await runWithOneRetry(
+      async () => ({ retryable: ++calls === 1, value: calls }),
+      (outcome) => outcome.retryable,
+    );
+
+    expect(calls).toBe(2);
+    expect(result).toEqual({ value: { retryable: false, value: 2 }, attempts: 2, retryCount: 1 });
+  });
+
+  it("does not retry a second retryable failure or a non-retryable failure", async () => {
+    let retryableCalls = 0;
+    const retryableResult = await runWithOneRetry(
+      async () => ({ retryable: true, value: ++retryableCalls }),
+      (outcome) => outcome.retryable,
+    );
+    let permanentCalls = 0;
+    const permanentResult = await runWithOneRetry(
+      async () => ({ retryable: false, value: ++permanentCalls }),
+      (outcome) => outcome.retryable,
+    );
+
+    expect(retryableCalls).toBe(2);
+    expect(retryableResult.retryCount).toBe(1);
+    expect(permanentCalls).toBe(1);
+    expect(permanentResult.retryCount).toBe(0);
   });
 });

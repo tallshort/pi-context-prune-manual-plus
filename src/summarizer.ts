@@ -7,6 +7,7 @@ import type {
   SummarizeBatchOptions,
   SummarizeBatchesOptions,
   SummarizeResult,
+  SummarizeFailure,
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
 
@@ -71,16 +72,40 @@ function receivedTextChars(message: AssistantMessage): number {
   }, 0);
 }
 
+function safeFailureMessage(value: unknown): string {
+  const firstLine = (value instanceof Error ? value.message : String(value)).split(/[\r\n]/, 1)[0];
+  return firstLine
+    .replace(/(?:api[_-]?key|authorization|bearer)\s*[:=]\s*\S+/gi, "[redacted]")
+    .replace(/https?:\/\/[^\s]+/gi, "[endpoint]")
+    .slice(0, 160) || "provider error";
+}
+
+/** Classifies a provider failure without retaining its raw error or stack. */
+export function classifySummarizerFailure(value: unknown): SummarizeFailure {
+  const message = safeFailureMessage(value);
+  const normalized = message.toLowerCase();
+  if (/\b429\b|rate.?limit|too many requests|quota exceeded/.test(normalized)) {
+    return { failureKind: "rate-limit", failureMessage: "rate limited", retryable: true };
+  }
+  if (/network|fetch failed|econn|enotfound|etimedout|socket|connection|tls|timeout/.test(normalized)) {
+    return { failureKind: "network", failureMessage: "network error", retryable: true };
+  }
+  if (/\b5\d\d\b|server error|internal error|service unavailable|overloaded|temporar/.test(normalized)) {
+    return { failureKind: "provider", failureMessage: "temporary provider error", retryable: true };
+  }
+  return { failureKind: "provider", failureMessage: message || "provider error", retryable: false };
+}
+
 /**
- * Summarizes a captured batch. Returns formatted markdown string, or null on failure.
- * Shows user-visible errors via ctx.ui.notify.
+ * Summarizes a captured batch. Returns a summary or a structured, safe failure.
+ * Abort remains exceptional so flushPending can preserve its cancellation semantics.
  */
 export async function summarizeBatch(
   batch: CapturedBatch,
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions = {}
-): Promise<SummarizeResult | null> {
+): Promise<SummarizeResult | SummarizeFailure> {
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
@@ -90,14 +115,16 @@ export async function summarizeBatch(
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok) {
       const authMessage = "error" in auth ? auth.error : "authentication failed";
-      ctx.ui.notify(`pruner: summarization failed: ${authMessage}`, "error");
-      return null;
+      const failure = classifySummarizerFailure(authMessage);
+      if (options.notifyOnFailure !== false) ctx.ui.notify(`pruner: summarization failed: ${failure.failureMessage}`, "error");
+      return failure;
     }
 
     const provider = ctx.modelRegistry.getProvider(model.provider);
     if (!provider) {
-      ctx.ui.notify(`pruner: summarization failed: unknown provider \"${model.provider}\"`, "error");
-      return null;
+      const failure: SummarizeFailure = { failureKind: "provider", failureMessage: "unknown provider", retryable: false };
+      if (options.notifyOnFailure !== false) ctx.ui.notify(`pruner: summarization failed: ${failure.failureMessage}`, "error");
+      return failure;
     }
 
     const serialized = serializeBatchForSummarizer(batch);
@@ -174,11 +201,9 @@ export async function summarizeBatch(
     // Propagate abort errors upward so flushPending can check signal.aborted
     // and return { ok: false, reason: "aborted" } without showing a UI error.
     if (options.signal?.aborted) throw err;
-    ctx.ui.notify(
-      `pruner: summarization failed: ${err.message}`,
-      "error"
-    );
-    return null;
+    const failure = classifySummarizerFailure(err);
+    if (options.notifyOnFailure !== false) ctx.ui.notify(`pruner: summarization failed: ${failure.failureMessage}`, "error");
+    return failure;
   }
 }
 
@@ -200,7 +225,7 @@ export async function summarizeBatches(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchesOptions = {}
-): Promise<Array<SummarizeResult | null>> {
+): Promise<Array<SummarizeResult | SummarizeFailure>> {
   if (batches.length === 0) return [];
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {

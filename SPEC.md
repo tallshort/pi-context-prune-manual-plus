@@ -49,6 +49,8 @@ For each batch:
 
 A failed summary or persistence operation restores unfinished work for retry. A successfully indexed batch must not be re-summarized.
 
+For `/pruner now` only, a structured summarizer/provider failure classified as rate-limit, network, or temporary provider error is retried once before the batch is restored. Cancellation, stale-context, persistence failures, threshold skips, and oversized-summary skips are never retried. Runtime overlay rows may retain a normalized failure kind and truncated, sanitized first-line message, but raw provider errors and stacks must not be written to session or index records.
+
 ## 5. Frontier invariant
 
 The prune frontier records the latest contiguous attempted range. It prevents repeated attempts over already-handled ranges while allowing capture to continue after that range.
@@ -71,7 +73,8 @@ Manual pruning uses bounded scheduling with soft cancellation:
 - cancellation prevents dispatch of additional batches;
 - already-started summary calls finish;
 - completed results are persisted normally; and
-- undispatched or failed work remains pending.
+- undispatched or failed work remains pending; and
+- a cancellation suppresses any not-yet-started retry attempt.
 
 The cancellation key is resolved through Pi's configured selection-cancel binding. The scheduler behavior is covered by unit tests.
 

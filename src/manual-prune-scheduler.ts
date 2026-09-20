@@ -33,12 +33,12 @@ export function createManualPruneOverlayLifecycle(): ManualPruneOverlayLifecycle
   };
 }
 
-export type ManualPruneProgressState = "pending" | "running" | "done" | "skipped";
+export type ManualPruneProgressState = "pending" | "running" | "retrying" | "done" | "failed" | "skipped";
 
 /** Formats the dynamic portion of the manual-prune overlay title. */
 export function formatManualPruneProgressStatus(states: readonly ManualPruneProgressState[]): string {
-  const completed = states.filter((state) => state === "done" || state === "skipped").length;
-  const running = states.filter((state) => state === "running").length;
+  const completed = states.filter((state) => state === "done" || state === "skipped" || state === "failed").length;
+  const running = states.filter((state) => state === "running" || state === "retrying").length;
   return `${completed}/${states.length} complete · ${running} running`;
 }
 
@@ -66,4 +66,17 @@ export async function runAbortableBounded<T, R>(
   );
 
   return results;
+}
+
+/** Runs one attempt, then at most one more when its result is retryable. */
+export async function runWithOneRetry<T>(
+  run: () => Promise<T>,
+  shouldRetry: (result: T) => boolean,
+): Promise<{ value: T; attempts: number; retryCount: number }> {
+  const first = await run();
+  if (!shouldRetry(first)) return { value: first, attempts: 1, retryCount: 0 };
+  // Yield once so the retrying row can render before its second request starts.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const second = await run();
+  return { value: second, attempts: 2, retryCount: 1 };
 }
