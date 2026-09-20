@@ -17,6 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
 import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
+import { runAbortableBounded } from "./src/manual-prune-scheduler.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
@@ -208,32 +209,27 @@ export default function (pi: ExtensionAPI) {
       // Other flush paths run fully parallel below.
       let results: BatchResult[];
       if (options.onProgress) {
-        results = Array.from({ length: batches.length }, () => null);
-        let nextIndex = 0;
-        const workerCount = Math.min(8, batches.length);
-        await Promise.all(
-          Array.from({ length: workerCount }, async () => {
-            while (nextIndex < batches.length && !options.signal?.aborted) {
-              const index = nextIndex++;
-              const batch = batches[index];
-              if (isSmallBatch(batch)) {
-                results[index] = { skippedSmall: true };
-                options.onProgress!(index, batches.length, batch, "skipped");
-                continue;
-              }
-              options.onProgress!(index, batches.length, batch, "start");
-              const result = await summarizeBatch(batch, currentConfig.value, ctx, {
-                // Manual cancellation is soft: finish already-started calls so their
-                // completed summaries can still be indexed, but do not start another.
-                signal: undefined,
-                onTextProgress: (receivedChars) => {
-                  reportBatchTextProgress(index, batches.length, batch, receivedChars);
-                },
-              });
-              results[index] = result;
-              options.onProgress!(index, batches.length, batch, result ? "done" : "skipped");
+        results = await runAbortableBounded(
+          batches,
+          8,
+          options.signal,
+          async (batch, index) => {
+            if (isSmallBatch(batch)) {
+              options.onProgress!(index, batches.length, batch, "skipped");
+              return { skippedSmall: true as const };
             }
-          })
+            options.onProgress!(index, batches.length, batch, "start");
+            const result = await summarizeBatch(batch, currentConfig.value, ctx, {
+              // Manual cancellation is soft: finish already-started calls so their
+              // completed summaries can still be indexed, but do not start another.
+              signal: undefined,
+              onTextProgress: (receivedChars) => {
+                reportBatchTextProgress(index, batches.length, batch, receivedChars);
+              },
+            });
+            options.onProgress!(index, batches.length, batch, result ? "done" : "skipped");
+            return result;
+          },
         );
       } else {
         const batchesToSummarize = batches.filter((batch) => !isSmallBatch(batch));

@@ -16,6 +16,7 @@ import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-a
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
+import { isManualPruneCancelInput } from "./manual-prune-scheduler.js";
 
 /**
  * Wraps a SettingsList with a border + title, delegating all input handling
@@ -278,6 +279,7 @@ class PruneProgressOverlay extends Container implements Focusable {
     private readonly theme: any,
     batches: CapturedBatch[],
     private readonly onCancel: () => void,
+    private readonly matchesCancel: (data: string) => boolean,
   ) {
     super();
     this.rows = batches.map((batch, index) => ({
@@ -299,7 +301,7 @@ class PruneProgressOverlay extends Container implements Focusable {
   }
 
   handleInput(data: string): void {
-    if ((data === "q" || data === "escape" || data === "\x1b") && !this.cancelling) {
+    if (isManualPruneCancelInput(data, this.matchesCancel) && !this.cancelling) {
       this.cancelling = true;
       this.onCancel();
       this.tui.requestRender();
@@ -794,9 +796,15 @@ export function registerCommands(
           let progressOverlay: PruneProgressOverlay | undefined;
           const progressOverlayPromise = ctx.hasUI
             ? ctx.ui.custom<void>(
-                (tui, theme, _keybindings, done) => {
+                (tui, theme, keybindings, done) => {
                   closeProgressOverlay = () => done(undefined);
-                  progressOverlay = new PruneProgressOverlay(tui, theme, batches, () => controller.abort());
+                  progressOverlay = new PruneProgressOverlay(
+                    tui,
+                    theme,
+                    batches,
+                    () => controller.abort(),
+                    (data) => keybindings.matches(data, "tui.select.cancel"),
+                  );
                   return progressOverlay;
                 },
                 {
