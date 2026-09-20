@@ -17,6 +17,7 @@ steps:
       - "- [x] step 1: add regression tests for cancel-key recognition and post-abort scheduling"
       - "- [x] step 2: run unit tests and rebuild the ignored bundle"
       - "- [x] step 3: cover dynamic completed-batch title progress"
+      - "- [x] step 4: cover normal scheduling and overlay cancellation/close lifecycle"
 ---
 
 # 046-manual-prune-progress
@@ -35,3 +36,4 @@ steps:
 - [x] step 1: add regression tests for cancel-key recognition and post-abort scheduling
 - [x] step 2: run unit tests and rebuild the ignored bundle
 - [x] step 3: cover dynamic completed-batch title progress
+- [x] step 4: cover normal scheduling and overlay cancellation/close lifecycle

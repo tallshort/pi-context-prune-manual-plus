@@ -16,7 +16,7 @@ import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-a
 import { buildPruneTree, TreeBrowser } from "./tree-browser.js";
 import { normalizeSummaryToolCallRefs, unwrapSummaryForDisplay } from "./summary-refs.js";
 import type { ToolCallIndexer } from "./indexer.js";
-import { formatManualPruneProgressStatus, isManualPruneCancelInput } from "./manual-prune-scheduler.js";
+import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput } from "./manual-prune-scheduler.js";
 
 /**
  * Wraps a SettingsList with a border + title, delegating all input handling
@@ -794,18 +794,18 @@ export function registerCommands(
 
           // A centered overlay owns focus for the duration of manual pruning.
           // It displays up to sixteen rows and uses Esc for a soft stop.
-          const controller = new AbortController();
-          let closeProgressOverlay: (() => void) | undefined;
+          const lifecycle = createManualPruneOverlayLifecycle();
           let progressOverlay: PruneProgressOverlay | undefined;
           const progressOverlayPromise = ctx.hasUI
             ? ctx.ui.custom<void>(
                 (tui, theme, keybindings, done) => {
-                  closeProgressOverlay = () => done(undefined);
+                  lifecycle.setClose(() => done(undefined));
                   progressOverlay = new PruneProgressOverlay(
                     tui,
                     theme,
                     batches,
-                    () => controller.abort(),
+                    () => lifecycle.cancel(),
+
                     (data) => keybindings.matches(data, "tui.select.cancel"),
                   );
                   return progressOverlay;
@@ -822,7 +822,7 @@ export function registerCommands(
 
           const result = await flushPending(ctx, {
             previewedBatches: batches,
-            signal: controller.signal,
+            signal: lifecycle.signal,
             onProgress: (index, _total, _batch, stage) => {
               if (stage === "start") {
                 updateRow(index, "running", 0);
@@ -837,13 +837,13 @@ export function registerCommands(
             },
           });
 
-          closeProgressOverlay?.();
+          lifecycle.close();
           await progressOverlayPromise;
           setPruneStatusWidget(ctx, currentConfig.value, getStats());
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";
-            const message = controller.signal.aborted || result.reason === "cancelled"
+            const message = lifecycle.signal.aborted || result.reason === "cancelled"
               ? "pruner: cancelled before any batch completed; all work remains pending"
               : `pruner: nothing flushed — ${result.reason}${suffix}`;
             ctx.ui.notify(message, result.reason === "empty" ? "info" : "warning");

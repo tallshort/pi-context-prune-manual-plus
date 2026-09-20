@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded } from "../src/manual-prune-scheduler.js";
+import { createManualPruneOverlayLifecycle, formatManualPruneProgressStatus, isManualPruneCancelInput, runAbortableBounded } from "../src/manual-prune-scheduler.js";
 
 describe("manual prune cancellation", () => {
   it("recognizes only Pi's configured cancel key", () => {
@@ -14,6 +14,29 @@ describe("manual prune cancellation", () => {
 
     expect(formatManualPruneProgressStatus(initial)).toBe("0/161 complete · 8 running");
     expect(formatManualPruneProgressStatus(afterOneCompletes)).toBe("1/161 complete · 7 running");
+  });
+  it("runs every batch in order when not cancelled", async () => {
+    const started: number[] = [];
+    const results = await runAbortableBounded([0, 1, 2, 3], 2, undefined, async (batch) => {
+      started.push(batch);
+      return batch * 10;
+    });
+
+    expect(started).toEqual([0, 1, 2, 3]);
+    expect(results).toEqual([0, 10, 20, 30]);
+  });
+
+  it("cancels and closes the overlay lifecycle exactly once", () => {
+    const close = vi.fn();
+    const lifecycle = createManualPruneOverlayLifecycle();
+    lifecycle.setClose(close);
+
+    lifecycle.cancel();
+    lifecycle.close();
+    lifecycle.close();
+
+    expect(lifecycle.signal.aborted).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("does not schedule batch nine or later after cancellation", async () => {

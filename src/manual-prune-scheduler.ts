@@ -6,6 +6,33 @@ export function isManualPruneCancelInput(
   return matchesCancel(data);
 }
 
+export interface ManualPruneOverlayLifecycle {
+  readonly signal: AbortSignal;
+  cancel(): void;
+  setClose(close: () => void): void;
+  close(): void;
+}
+
+/** Owns cancellation and one-time cleanup for the manual-prune overlay. */
+export function createManualPruneOverlayLifecycle(): ManualPruneOverlayLifecycle {
+  const controller = new AbortController();
+  let closeHandler: (() => void) | undefined;
+  let closed = false;
+
+  return {
+    signal: controller.signal,
+    cancel: () => controller.abort(),
+    setClose: (close) => {
+      closeHandler = close;
+    },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      closeHandler?.();
+    },
+  };
+}
+
 export type ManualPruneProgressState = "pending" | "running" | "done" | "skipped";
 
 /** Formats the dynamic portion of the manual-prune overlay title. */
