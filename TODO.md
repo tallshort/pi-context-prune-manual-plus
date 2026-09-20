@@ -5,7 +5,7 @@ Future improvements that preserve the core context-pruning algorithm.
 ## Reliability and controls
 
 - [x] Make `/pruner now` concurrency configurable (manually verified by the user).
-- [ ] Add provider-limit backoff and automatic throttling after retryable failures.
+- [ ] Add shared provider rate-limit cooldown and automatic throttling for all summarizer triggers (awaiting manual verification).
 - [x] Reuse successful out-of-order batch summaries in memory when an earlier batch fails, without advancing the contiguous frontier; clear them on reload or branch changes (manually verified by the user).
 - [ ] Persist deferred batch summaries across reloads so they can later commit without another provider call (low priority).
 - [x] Add one automatic retry for retryable `/pruner now` summarizer/provider failures, with per-batch failure visibility and cumulative retry/failure statistics (manually verified by the user).

@@ -10,7 +10,9 @@ import type {
   SummarizeFailure,
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
+import { ProviderRateLimitGate } from "./provider-rate-limit-gate.js";
 
+const rateLimitGate = new ProviderRateLimitGate();
 const SYSTEM_PROMPT = `You are summarizing a batch of tool calls made by an AI coding assistant.
 For each tool call provide:
 - Tool name and a one-sentence description of what it did
@@ -110,6 +112,10 @@ export async function summarizeBatch(
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
+  const remainingCooldownMs = rateLimitGate.remainingMs();
+  if (remainingCooldownMs > 0) {
+    return { failureKind: "rate-limit", failureMessage: `provider cooldown: retry in ${Math.ceil(remainingCooldownMs / 1000)}s`, retryable: false };
+  }
   try {
     const model = resolveModel(config, ctx);
 
@@ -203,6 +209,7 @@ export async function summarizeBatch(
     // and return { ok: false, reason: "aborted" } without showing a UI error.
     if (options.signal?.aborted) throw err;
     const failure = classifySummarizerFailure(err);
+    if (failure.failureKind === "rate-limit") rateLimitGate.recordRateLimit();
     if (options.notifyOnFailure !== false) ctx.ui.notify(`pruner: summarization failed: ${failure.failureMessage}`, "error");
     return failure;
   }

@@ -52,6 +52,8 @@ A failed summary or persistence operation restores unfinished work for retry. A 
 
 For `/pruner now` only, a structured summarizer/provider failure classified as rate-limit, network, or temporary provider error is retried once before the batch is restored. Cancellation, stale-context, persistence failures, threshold skips, and oversized-summary skips are never retried. Runtime overlay rows may retain a normalized failure kind and truncated, sanitized first-line message, but raw provider errors and stacks must not be written to session or index records.
 
+A process-local shared provider cooldown applies before every summarizer request, independent of its flush trigger. A rate-limit failure enters bounded exponential backoff (5 seconds, doubling to 60 seconds); requests during cooldown do not call the provider and remain pending for a later flush. The cooldown is intentionally not durable across session reloads.
+
 ## 5. Frontier invariant
 
 The prune frontier records the latest contiguous attempted range. It prevents repeated attempts over already-handled ranges while allowing capture to continue after that range.

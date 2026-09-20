@@ -154,7 +154,7 @@ The extension registers the `/pruner` command:
 | `/pruner stats` | Show cumulative summarizer token/cost stats, automatic retry total, terminal failed-batch total, and normalized failure-kind counts |
 | `/pruner tree` | Browse pruned tool calls in a foldable tree browser; press `Ctrl-O` on a summary to open it in a bordered overlay |
 | `/pruner dry-run` | Preview pending batches, threshold skips, and a historical summary/savings estimate without calling the summarizer or changing session/index/frontier state. |
-| `/pruner now` | Flush pending tool calls immediately (works in all modes) in a focusable centered progress overlay showing up to 16 batch rows. It automatically retries a rate-limit, network, or temporary provider failure once per batch; the row then shows either the retry or a themed terminal failure. Press `Esc` to stop scheduling new batches; already-running batches finish and are retained. The overlay closes automatically when processing ends. |
+| `/pruner now` | Flush pending tool calls immediately (works in all modes) in a focusable centered progress overlay showing up to 16 batch rows. It automatically retries a rate-limit, network, or temporary provider failure once per batch; the row then shows either the retry or a themed terminal failure. A rate limit applies a shared 5s-to-60s process-local cooldown to all summarizer triggers; requests during cooldown remain pending. Press `Esc` to stop scheduling new batches; already-running batches finish and are retained. The overlay closes automatically when processing ends. |
 | `/pruner help` | Show full help text |
 
 ### Settings overlay
