@@ -25,7 +25,7 @@ vi.mock("../../src/tree-browser.js", () => ({
   TreeBrowser: class TreeBrowser {},
 }));
 
-import { registerCommands } from "../../src/commands.js";
+import { registerCommands, selectProgressWindow } from "../../src/commands.js";
 import { DEFAULT_CONFIG, type CapturedBatch, type FlushOptions } from "../../src/types.js";
 
 describe("/pruner now", () => {
@@ -141,5 +141,9 @@ describe("/pruner now", () => {
     await handler;
     const output = overlay!.render(100).join("\n");
     expect(output).toContain("<error>✗</error><text> Batch 1/1 · failed after 2 attempts · network error");
+  });
+  it("fast-forwards past leading terminal rows", () => {
+    const rows = ["done", "skipped", "failed", "running", "pending", "done"].map((status, index) => ({ index, status: status as any }));
+    expect(selectProgressWindow(rows, 3).map((row) => row.index)).toEqual([3, 4, 5]);
   });
 });

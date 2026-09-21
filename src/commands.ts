@@ -289,6 +289,12 @@ interface WidgetRow {
 
 const MAX_PROGRESS_ROWS = 16;
 
+export function selectProgressWindow<T extends { status: RowStatus }>(rows: readonly T[], maxRows = MAX_PROGRESS_ROWS): readonly T[] {
+  const firstNonTerminal = rows.findIndex((row) => row.status !== "done" && row.status !== "skipped" && row.status !== "failed");
+  const start = firstNonTerminal < 0 ? Math.max(0, rows.length - maxRows) : firstNonTerminal;
+  return rows.slice(start, start + maxRows);
+}
+
 /** Centered, focusable progress UI for `/pruner now`. */
 class PruneProgressOverlay extends Container implements Focusable {
   private readonly rows: WidgetRow[];
@@ -380,9 +386,7 @@ class PruneProgressOverlay extends Container implements Focusable {
 
   override render(width: number): string[] {
     const innerWidth = Math.max(42, width - 2);
-    const runningIndex = this.rows.findIndex((row) => row.status === "running");
-    const windowEnd = runningIndex < 0 ? this.rows.length : Math.max(MAX_PROGRESS_ROWS, runningIndex + 1);
-    const visibleRows = this.rows.slice(Math.max(0, windowEnd - MAX_PROGRESS_ROWS), windowEnd);
+    const visibleRows = selectProgressWindow(this.rows);
     const progressStatus = formatManualPruneProgressStatus(this.rows.map((row) => row.status));
     const title = this.cancelling
       ? `${this.theme.fg("accent", "Pruner Now")}${this.theme.fg("warning", ` (Cancelling · ${progressStatus})`)}`
