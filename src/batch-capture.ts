@@ -155,6 +155,87 @@ export function captureUnindexedBatchesFromSession(
   return batches;
 }
 
+/**
+ * Captures eligible tool calls from Pi's canonical, provenance-preserving session
+ * projection. `projection` has already applied active-branch, compaction, and
+ * context_edit semantics; `branch` is used only to retain session-relative turn
+ * indexes from the append-only history.
+ */
+export function captureUnindexedBatchesFromProjection(
+  branch: any[],
+  projection: Array<{ sourceEntry: any; messages: any[] }>,
+  indexer: { isSummarized(id: string): boolean },
+  excludeToolNames: string[] = [],
+): CapturedBatch[] {
+  const turnIndexes = new Map<string, number>();
+  let turnCounter = 0;
+  for (const entry of branch) {
+    if (entry.type === "message" && entry.message?.role === "assistant") {
+      turnIndexes.set(entry.id, turnCounter++);
+    }
+  }
+
+  // A projected entry retains the append-only source entry, while `messages`
+  // contains only what Pi will send to the provider. In particular, an edited
+  // result has replacement content and an omitted result has no message.
+  const visible = projection.flatMap(({ sourceEntry, messages }) =>
+    sourceEntry.type === "message"
+      ? messages.map((message) => ({ sourceEntry, message }))
+      : [],
+  );
+  // Group boundaries remain session-relative even when a user message is omitted
+  // from provider context. This preserves agent-message batching semantics.
+  const userTurnGroups = new Map<string, number>();
+  let userTurnGroup = 0;
+  for (const { sourceEntry } of projection) {
+    if (sourceEntry.type === "message" && sourceEntry.message?.role === "user") {
+      userTurnGroup++;
+    }
+    userTurnGroups.set(sourceEntry.id, userTurnGroup);
+  }
+
+  const resultMap = new Map<string, any>();
+  for (const { message } of visible) {
+    if (message.role === "toolResult" && message.toolCallId) {
+      resultMap.set(message.toolCallId, message);
+    }
+  }
+
+  const batches: CapturedBatch[] = [];
+  for (const { sourceEntry, message } of visible) {
+    if (message.role !== "assistant") continue;
+
+    const content = Array.isArray(message.content) ? message.content : [];
+    const readyToPrune = content
+      .filter((block: any) => block.type === "toolCall")
+      .filter((toolCall: any) =>
+        toolCall.id &&
+        !indexer.isSummarized(toolCall.id) &&
+        !excludeToolNames.includes(toolCall.name) &&
+        resultMap.has(toolCall.id),
+      );
+    if (readyToPrune.length === 0) continue;
+
+    const results = readyToPrune.map((toolCall: any) => resultMap.get(toolCall.id));
+    const readyIds = new Set(readyToPrune.map((toolCall: any) => toolCall.id));
+    const timestamp = sourceEntry.timestamp
+      ? new Date(sourceEntry.timestamp).getTime()
+      : (message.timestamp ?? Date.now());
+    const batch = captureBatch(
+      message,
+      results,
+      turnIndexes.get(sourceEntry.id) ?? 0,
+      timestamp,
+    );
+    batches.push({
+      ...batch,
+      toolCalls: batch.toolCalls.filter((toolCall) => readyIds.has(toolCall.toolCallId)),
+      userTurnGroup: userTurnGroups.get(sourceEntry.id) ?? 0,
+    });
+  }
+
+  return batches;
+}
 /** Serializes a single CapturedBatch into readable text for the summarizer LLM. */
 export function serializeBatchForSummarizer(batch: CapturedBatch): string {
   const parts: string[] = [];

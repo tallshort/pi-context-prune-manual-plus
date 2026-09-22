@@ -15,7 +15,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
-import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
+import { captureBatch, captureUnindexedBatchesFromProjection, groupBatchesByMode } from "./src/batch-capture.js";
 import { summarizeBatch, summarizeBatches, waitForSummarizerCooldown } from "./src/summarizer.js";
 import { runAbortableBounded, runWithOneRetry } from "./src/manual-prune-scheduler.js";
 import { planFlushSettlement } from "./src/flush-settlement.js";
@@ -147,9 +147,16 @@ export default function (pi: ExtensionAPI) {
     let batches: CapturedBatch[] = [];
     try {
       const branch = ctx.sessionManager.getBranch();
-      batches = captureUnindexedBatchesFromSession(branch, indexer, [CONTEXT_PRUNE_TOOL_NAME]);
+      const projection = ctx.sessionManager.buildSessionProjection();
+      batches = captureUnindexedBatchesFromProjection(
+        branch,
+        projection.entries,
+        indexer,
+        [CONTEXT_PRUNE_TOOL_NAME],
+      );
     } catch {
-      batches = pendingBatches.slice();
+      // Do not fall back to turn_end's raw batches: they may predate a
+      // context_edit. Failing closed prevents hidden content being summarized.
     }
     batches = batches
       .map((batch) => trimBatchToPendingRange(batch))

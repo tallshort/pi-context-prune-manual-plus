@@ -4,6 +4,8 @@
 
 A [Pi coding-agent](https://github.com/badlogic/pi-mono) extension that summarizes completed tool-call batches, prunes raw tool outputs from future LLM context, and preserves the originals for on-demand recovery.
 
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## What this fork adds
 
 The primary enhancement is safe, observable **manual on-demand pruning** through `/pruner now`, so you can explicitly initiate pruning when using on-demand mode.
