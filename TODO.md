@@ -29,4 +29,5 @@ Future improvements that preserve the core context-pruning algorithm.
 - [x] Extend unit tests beyond manual cancellation: cover compaction-boundary capture, small-batch threshold handling, partial flush failures, and frontier advancement. (manually verified by the user)
 - [x] Add integration-style tests for `/pruner now` progress and cancellation. (manually verified by the user)
 - [ ] Add integration-style test for session-branch restoration.
-- [ ] Support Pi 0.87 context-edit projection during batch capture so omitted or replaced tool results never reach the pruner.
+- [x] Support Pi 0.87 context-edit projection during batch capture so omitted or replaced tool results never reach the pruner. (manually verified by the user)
+- [ ] Harden low-risk Pi 0.87 integration: fail open for non-text tool results, count only visible results in reminders, and document upstream-owned context-edit gaps.

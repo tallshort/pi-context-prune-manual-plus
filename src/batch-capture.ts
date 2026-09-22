@@ -1,6 +1,14 @@
 import type { CapturedBatch, CapturedToolCall, BatchingMode } from "./types.js";
 
 /**
+ * The pruner index currently stores text only. Preserve Pi's typed content by
+ * leaving any image or other non-text tool result in provider context.
+ */
+export function isTextOnlyToolResult(result: any): boolean {
+  return Array.isArray(result?.content) && result.content.every((block: any) => block?.type === "text");
+}
+
+/**
  * Converts turn_end event data into a CapturedBatch.
  * @param message      AssistantMessage (content: Array of TextContent|ThinkingContent|ToolCall)
  * @param toolResults  ToolResultMessage[]
@@ -25,16 +33,13 @@ export function captureBatch(
     .filter((block: any) => block.type === "toolCall")
     .map((block: any) => {
       const match = toolResults.find((result: any) => result.toolCallId === block.id);
+      if (match && !isTextOnlyToolResult(match)) return null;
 
       let resultText = "(no result)";
       let isError = false;
 
       if (match) {
-        const resultContent: any[] = Array.isArray(match.content) ? match.content : [];
-        resultText = resultContent
-          .filter((c: any) => c.type === "text")
-          .map((c: any) => c.text)
-          .join("\n");
+        resultText = match.content.map((c: any) => c.text).join("\n");
         isError = match.isError ?? false;
       }
 
@@ -45,7 +50,8 @@ export function captureBatch(
         resultText,
         isError,
       } satisfies CapturedToolCall;
-    });
+    })
+    .filter((toolCall): toolCall is CapturedToolCall => toolCall !== null);
 
   return { turnIndex, timestamp, assistantText, toolCalls };
 }
@@ -130,7 +136,7 @@ export function captureUnindexedBatchesFromSession(
       if (!id) return false;
       if (indexer.isSummarized(id)) return false;
       if (excludeToolNames.includes(tc.name)) return false;
-      return resultMap.has(id);
+      return resultMap.has(id) && isTextOnlyToolResult(resultMap.get(id));
     });
 
     if (readyToPrune.length > 0) {
@@ -142,13 +148,16 @@ export function captureUnindexedBatchesFromSession(
       // without accidentally capturing later unresolved calls from the same
       // assistant message as "(no result)" placeholders.
       const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : (msg.timestamp ?? Date.now());
-      const batch = captureBatch(msg, results, currentTurnIndex, ts);
-      batches.push({
-        ...batch,
-        toolCalls: batch.toolCalls.filter((tc) => readyIds.has(tc.toolCallId)),
-        // Tag with the current group so flushPending can merge by mode
-        userTurnGroup,
-      });
+      const captured = captureBatch(msg, results, currentTurnIndex, ts);
+      const toolCalls = captured.toolCalls.filter((tc) => readyIds.has(tc.toolCallId));
+      if (toolCalls.length > 0) {
+        batches.push({
+          ...captured,
+          toolCalls,
+          // Tag with the current group so flushPending can merge by mode
+          userTurnGroup,
+        });
+      }
     }
   }
 
@@ -212,7 +221,8 @@ export function captureUnindexedBatchesFromProjection(
         toolCall.id &&
         !indexer.isSummarized(toolCall.id) &&
         !excludeToolNames.includes(toolCall.name) &&
-        resultMap.has(toolCall.id),
+        resultMap.has(toolCall.id) &&
+        isTextOnlyToolResult(resultMap.get(toolCall.id)),
       );
     if (readyToPrune.length === 0) continue;
 

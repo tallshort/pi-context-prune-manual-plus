@@ -29,12 +29,15 @@ const PRUNER_NOTE_OPEN = "<pruner-note>";
 const PRUNER_NOTE_CLOSE = "</pruner-note>";
 
 /**
- * Counts tool-call results currently in `messages` that have NOT yet been
- * summarized. A tool call is considered "unpruned" when its `toolCallId`
- * appears as an `AssistantMessage` `toolCall` content block but is absent
- * from the indexer.
+ * Counts unindexed tool calls only when their matching tool result is still
+ * visible in the effective provider context.
  */
 export function countUnprunedToolCalls(messages: any[], indexer: ToolCallIndexer): number {
+  const visibleResultIds = new Set(
+    messages
+      .filter((message) => message?.role === "toolResult" && message.toolCallId)
+      .map((message) => message.toolCallId),
+  );
   let count = 0;
   for (const msg of messages) {
     if (msg?.role !== "assistant") continue;
@@ -42,8 +45,7 @@ export function countUnprunedToolCalls(messages: any[], indexer: ToolCallIndexer
     for (const block of msg.content) {
       if (block?.type !== "toolCall") continue;
       const id = block.toolCallId ?? block.id;
-      if (!id) continue;
-      if (!indexer.isSummarized(id)) count++;
+      if (id && visibleResultIds.has(id) && !indexer.isSummarized(id)) count++;
     }
   }
   return count;

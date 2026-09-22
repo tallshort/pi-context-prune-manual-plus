@@ -6,6 +6,29 @@ A [Pi coding-agent](https://github.com/badlogic/pi-mono) extension that summariz
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
+## Pi 0.87 compatibility
+
+This extension requires Pi `0.87.0` or newer. It captures new pruning candidates from Pi's effective session projection, so a tool result omitted with `context_edit(..., null)` is not summarized and a result replaced before pruning is summarized from its replacement content.
+
+### Resolved in this fork
+
+- New pruning candidates are captured from Pi's effective session projection rather than raw session entries.
+- A tool result omitted with `context_edit(..., null)` is not summarized, indexed, or pruned.
+- A result replaced before pruning is captured and summarized from its replacement content.
+- Tool results containing images or other non-text content are left in provider context until the recovery index can preserve typed content losslessly.
+- The agentic-auto reminder counts only unindexed calls whose matching tool result is still visible in effective context.
+- `/pruner tree` is a **raw-history and recovery view**. It intentionally reads the append-only session branch and may show original indexed records or summaries that are no longer visible to the provider.
+
+### Upstream issue candidates
+
+The following Pi 0.87 context-edit cases require changes to pruning lifecycle or durable index semantics and are deliberately not implemented in this fork:
+
+- A replacement made **after** a tool result has already been summarized needs versioned/provenance-aware index and frontier records so the corrected result can be reconsidered safely.
+- Omitting or replacing a persisted pruner summary needs coordination between summary visibility and authorization to hide its raw tool results.
+- Actionable boundary drafts and final settlement need canonical ordering for extensions that summarize and persist derived session entries.
+
+These are core pruning-model concerns. Until an upstream contract exists, this fork preserves the conservative behavior above instead of changing index, summary, or frontier persistence semantics.
+
 ## What this fork adds
 
 The primary enhancement is safe, observable **manual on-demand pruning** through `/pruner now`, so you can explicitly initiate pruning when using on-demand mode.

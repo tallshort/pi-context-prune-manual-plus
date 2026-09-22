@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
-import { captureUnindexedBatchesFromSession } from "../../src/batch-capture.js";
+import { captureBatch, captureUnindexedBatchesFromSession } from "../../src/batch-capture.js";
 
 const unsummarizedIndexer = { isSummarized: () => false };
 
+
+describe("captureBatch", () => {
+  it("does not capture image-bearing tool results", () => {
+    const batch = captureBatch(
+      { role: "assistant", content: [{ type: "toolCall", id: "image-call", name: "read", input: {} }] },
+      [{ role: "toolResult", toolCallId: "image-call", content: [{ type: "image", data: "base64", mimeType: "image/png" }] }],
+      0,
+      0,
+    );
+
+    expect(batch.toolCalls).toEqual([]);
+  });
+});
 describe("captureUnindexedBatchesFromSession active branch", () => {
   it("captures a completed tool result retained after compaction", () => {
     const batches = captureUnindexedBatchesFromSession(
@@ -206,5 +219,18 @@ describe("captureUnindexedBatchesFromProjection", () => {
     expect(projection.entries.find((entry) => entry.sourceEntry.id === "result")?.messages[0]).toMatchObject({ toolCallId: "call", content: [{ type: "text", text: "safe replacement" }] });
     expect(omittedBatches).toEqual([]);
     expect(batches[0]).toMatchObject({ timestamp: Date.parse("2025-01-01T00:00:00.000Z"), toolCalls: [{ toolCallId: "call", resultText: "safe replacement" }] });
+  });
+  it("fails open for image-bearing projected tool results", async () => {
+    const { captureUnindexedBatchesFromProjection } = await import("../../src/batch-capture.js");
+    const assistant = { id: "assistant", type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "image-call", name: "read", input: {} }] } };
+    const result = { id: "result", type: "message", message: { role: "toolResult", toolCallId: "image-call", content: [{ type: "image", data: "base64", mimeType: "image/png" }] } };
+
+    const batches = captureUnindexedBatchesFromProjection(
+      [assistant, result],
+      [project(assistant, [assistant.message]), project(result, [result.message])],
+      unsummarizedIndexer,
+    );
+
+    expect(batches).toEqual([]);
   });
 });

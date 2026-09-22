@@ -1,5 +1,9 @@
 import type { ToolCallIndexer } from "./indexer.js";
 
+function isTextOnlyToolResult(message: any): boolean {
+  return Array.isArray(message?.content) && message.content.every((block: any) => block?.type === "text");
+}
+
 /**
  * Filters the `context` event message array.
  * Removes ToolResultMessage entries where toolCallId is in the index.
@@ -8,7 +12,11 @@ import type { ToolCallIndexer } from "./indexer.js";
 export function pruneMessages(messages: any[], indexer: ToolCallIndexer): any[] {
   return messages.filter((msg) => {
     // Only remove toolResult messages that have been summarized
-    if (msg.role === "toolResult" && indexer.isSummarized(msg.toolCallId)) {
+    if (
+      msg.role === "toolResult" &&
+      isTextOnlyToolResult(msg) &&
+      indexer.isSummarized(msg.toolCallId)
+    ) {
       return false;
     }
     return true;
