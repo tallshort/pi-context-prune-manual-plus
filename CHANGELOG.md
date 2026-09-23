@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.2]
+
+### Fixed
+
+- Ported and extended upstream's [on-demand session hydration fix](https://github.com/championswimmer/pi-context-prune/commit/0758cb12511eeea18a51930840bae921e8475728) to initialize persisted pruning configuration before early `before_agent_start` and `context` hooks, so the first agentic-auto request receives its pruning tool, prompt, and persisted index filtering.
+- Fail open when malformed persisted pruning metadata cannot be hydrated, preserving provider context instead of rejecting the request.
+
+### Documented
+
+- Document early lifecycle fallback hydration in the runtime event flow.
+
 ## [1.6.1]
 
 ### Fixed

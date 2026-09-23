@@ -1,6 +1,6 @@
 {
   "name": "@tallshort/pi-context-prune-manual-plus",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Pi extension fork with manual on-demand context pruning and safe recovery enhancements.",
   "type": "module",
   "main": "./dist/index.js",
