@@ -378,6 +378,12 @@ session_tree
   └─► frontier.reconstruct()    rebuild last prune-attempt boundary for the branch
   └─► clear pendingBatches      discard queued batches from old branch
 
+before_agent_start (fallback when it precedes session_start)
+  └─► loadConfig() + syncToolActivation()  initialize agentic-auto prompt/tool state
+
+context (fallback when it precedes session_start)
+  └─► loadConfig() + syncToolActivation()  initialize persisted settings before filtering
+  └─► hydrate persisted index/stats/frontier before filtering provider-visible messages
 turn_end (tool calls present + enabled)
   └─► captureBatch()            serialize the just-finished tool call batch
   └─► trim against index/frontier so same-turn later tool calls survive an earlier mid-turn prune

@@ -41,11 +41,27 @@ import {
 import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
+import { hydrateSessionState } from "./src/session-hydration.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
   const currentConfig: { value: ContextPruneConfig } = {
     value: { ...DEFAULT_CONFIG, pruneOn: "every-turn" },
+  };
+
+  // Serialize config reads so an early lifecycle fallback cannot overwrite a
+  // newer session-start refresh after both requests complete.
+  let configLoadPromise: Promise<void> | undefined;
+  const queueConfigReload = () => {
+    const previous = configLoadPromise?.catch(() => undefined) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      currentConfig.value = await loadConfig();
+    });
+    configLoadPromise = next;
+    return next;
+  };
+  const ensureConfigLoaded = async () => {
+    await (configLoadPromise ?? queueConfigReload());
   };
 
   // Shared indexer — rebuilt from session on every session_start / session_tree
@@ -56,6 +72,23 @@ export default function (pi: ExtensionAPI) {
 
   // Shared prune frontier — tracks the last completed prune attempt boundary
   const frontier = new PruneFrontierTracker();
+  // Rebuilt on lifecycle events and defensively before the first context hook.
+  let hydrated = false;
+  const hydrateFromSession = (ctx: any): boolean => {
+    try {
+      hydrateSessionState(ctx, indexer, statsAccum, frontier);
+      hydrated = true;
+      return true;
+    } catch {
+      // Persisted custom entries are untrusted history. Keep provider context
+      // intact rather than allowing a malformed record to reject this hook.
+      indexer.reset();
+      statsAccum.reset();
+      frontier.reset();
+      hydrated = false;
+      return false;
+    }
+  };
 
   // Pending batches — accumulated until the prune trigger fires
   const pendingBatches: CapturedBatch[] = [];
@@ -528,16 +561,10 @@ export default function (pi: ExtensionAPI) {
   // ── session_start: restore config + index + stats ────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
     // Load config from ~/.pi/agent/context-prune/settings.json
-    currentConfig.value = await loadConfig();
+    await queueConfigReload();
 
-    // Rebuild in-memory index from persisted session entries
-    indexer.reconstructFromSession(ctx);
-
-    // Rebuild stats accumulator from persisted session entries
-    statsAccum.reconstructFromSession(ctx);
-
-    // Rebuild prune frontier from persisted session entries
-    frontier.reconstructFromSession(ctx);
+    // Rebuild all persisted pruning state from the active session branch.
+    hydrateFromSession(ctx);
 
     // Clear any batches queued before the session reload
     pendingBatches.length = 0;
@@ -559,9 +586,7 @@ export default function (pi: ExtensionAPI) {
 
   // Rebuild index and stats after tree navigation too (branch may have different history)
   pi.on("session_tree", async (_event, ctx) => {
-    indexer.reconstructFromSession(ctx);
-    statsAccum.reconstructFromSession(ctx);
-    frontier.reconstructFromSession(ctx);
+    hydrateFromSession(ctx);
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
     deferredSummaries.clear();
@@ -645,8 +670,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── context: prune summarized tool results from next LLM call ─────────────
-  pi.on("context", async (event, _ctx) => {
+  pi.on("context", async (event, ctx) => {
+    // session_start normally loads settings. If another extension starts an
+    // agent turn first, load the persisted setting before deciding to return.
+    await ensureConfigLoaded();
+    syncToolActivation();
     if (!currentConfig.value.enabled) return undefined;
+
+    // A context hook can run before this extension's session_start handler when
+    // extensions are loaded in an unfavorable order. Rebuild state on demand so
+    // persisted summaries are still removed from that first provider request.
+    if (!hydrated) hydrateFromSession(ctx);
 
     const indexEmpty = indexer.getIndex().size === 0;
     let messages = event.messages;
@@ -684,6 +718,9 @@ export default function (pi: ExtensionAPI) {
 
   // ── before_agent_start: inject system prompt for agentic-auto mode ───────────
   pi.on("before_agent_start", async (event, _ctx) => {
+    // This can precede session_start when another extension starts the agent.
+    await ensureConfigLoaded();
+    syncToolActivation();
     if (!currentConfig.value.enabled || currentConfig.value.pruneOn !== "agentic-auto") return undefined;
     // Append agentic-auto instructions to the system prompt
     const appended = AGENTIC_AUTO_SYSTEM_PROMPT;

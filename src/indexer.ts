@@ -12,15 +12,20 @@ export class ToolCallIndexer {
   private aliasToToolCallId = new Map<string, string>();
   private nextShortAliasNumber = 1;
 
+
+  /** Clears all reconstructed index and short-reference state. */
+  reset(): void {
+    this.index.clear();
+    this.aliasToToolCallId.clear();
+    this.nextShortAliasNumber = 1;
+  }
+
   /**
    * Rebuilds the in-memory index from session history by scanning all
    * custom entries with customType === CUSTOM_TYPE_INDEX.
    */
   reconstructFromSession(ctx: ExtensionContext): void {
-    this.index.clear();
-    this.aliasToToolCallId.clear();
-    this.nextShortAliasNumber = 1;
-
+    this.reset();
     const branch = ctx.sessionManager.getBranch();
     for (const entry of branch) {
       if (entry.type === "custom" && (entry as any).customType === CUSTOM_TYPE_INDEX) {
