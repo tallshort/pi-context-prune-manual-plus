@@ -9,6 +9,14 @@ export type UsageSession = Pick<SessionManager, "getSessionId"> &
 
 export type UsageLogWriter = (record: UsageLogRecord) => void;
 
+function notifyUsageErrorSafely(notifyError: (error: unknown) => void, error: unknown): void {
+  try {
+    notifyError(error);
+  } catch {
+    // Usage diagnostics must never change pruning outcomes.
+  }
+}
+
 /** Report one provider response independently of whether its summary is later accepted. */
 export function reportSummarizerUsage(
   session: UsageSession,
@@ -18,13 +26,6 @@ export function reportSummarizerUsage(
   writeLog: UsageLogWriter = appendUsageLog,
 ): void {
   if (!response.usage) return;
-  const notify = (error: unknown) => {
-    try {
-      notifyError(error);
-    } catch {
-      // Reporting diagnostics must not change pruning outcomes.
-    }
-  };
   const provider = response.provider;
   const model = (response as AssistantMessage & { responseModel?: string }).responseModel ?? response.model;
   let entry: ReturnType<SessionManager["appendUsage"]> | undefined;
@@ -41,7 +42,7 @@ export function reportSummarizerUsage(
       );
     }
   } catch (error) {
-    notify(error);
+    notifyUsageErrorSafely(notifyError, error);
   }
 
   try {
@@ -59,7 +60,7 @@ export function reportSummarizerUsage(
       kind: "context_prune",
     });
   } catch (error) {
-    notify(error);
+    notifyUsageErrorSafely(notifyError, error);
   }
 }
 
@@ -77,26 +78,19 @@ interface SummarizerUsageReporterOptions {
  */
 export function createSummarizerUsageReporter(options: SummarizerUsageReporterOptions) {
   const reported = new WeakSet<AssistantMessage>();
-  const notify = (error: unknown) => {
-    try {
-      options.notifyError(error);
-    } catch {
-      // Usage reporting must remain isolated from pruning outcomes.
-    }
-  };
   return (batch: CapturedBatch, response: AssistantMessage): boolean => {
     if (!response.usage || reported.has(response)) return false;
     reported.add(response);
     try {
       options.addUsage(response.usage);
     } catch (error) {
-      notify(error);
+      notifyUsageErrorSafely(options.notifyError, error);
     }
     reportSummarizerUsage(
       options.session,
       response,
       batch,
-      notify,
+      options.notifyError,
       options.writeLog ?? appendUsageLog,
     );
     return true;
