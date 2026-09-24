@@ -199,6 +199,31 @@ describe("flush usage accounting", () => {
     expect(usageWarnings).toHaveLength(1);
   });
 
+  it("does not warn twice across an identified session's transient lookup failure", async () => {
+    let lookupState: "identified" | "failed" = "identified";
+    const appendUsage = vi.fn(() => { throw new Error("session usage failed"); });
+    const { ctx } = setup([
+      response("short summary"),
+      response("short summary"),
+      response("short summary"),
+    ], appendUsage);
+    ctx.sessionManager.getSessionId = () => {
+      if (lookupState === "failed") throw new Error("session id unavailable");
+      return "session-1";
+    };
+
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-1", 7)] });
+    lookupState = "failed";
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-2", 8)] });
+    lookupState = "identified";
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-3", 9)] });
+
+    const usageWarnings = ctx.ui.notify.mock.calls.filter(([message]: [string]) =>
+      message.includes("could not record summarizer usage"),
+    );
+    expect(usageWarnings).toHaveLength(1);
+  });
+
   it("warns again when one session manager moves to a different identified session", async () => {
     let sessionId = "session-1";
     const appendUsage = vi.fn(() => { throw new Error("session usage failed"); });

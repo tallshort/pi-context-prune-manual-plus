@@ -122,27 +122,20 @@ export default function (pi: ExtensionAPI) {
   };
 
   const warnedUsageSessionIds = new Set<string>();
-  const warnedUnknownUsageSessions = new WeakSet<object>();
+  const lastKnownUsageSessionIds = new WeakMap<object, string>();
   const notifyUsageError = (ctx: any, session: UsageSession, error: unknown) => {
-    let sessionId = "";
+    let sessionId = lastKnownUsageSessionIds.get(session) ?? "";
     try {
-      sessionId = session.getSessionId();
-    } catch {
-      // Fall back to manager identity when the session cannot identify itself.
-    }
-    if (sessionId) {
-      if (warnedUsageSessionIds.has(sessionId)) return;
-      // A transient identity failure may already have emitted this session's
-      // warning under manager identity. Transfer that marker without warning again.
-      if (warnedUnknownUsageSessions.delete(session)) {
-        warnedUsageSessionIds.add(sessionId);
-        return;
+      const currentSessionId = session.getSessionId();
+      if (currentSessionId) {
+        sessionId = currentSessionId;
+        lastKnownUsageSessionIds.set(session, currentSessionId);
       }
-      warnedUsageSessionIds.add(sessionId);
-    } else {
-      if (warnedUnknownUsageSessions.has(session)) return;
-      warnedUnknownUsageSessions.add(session);
+    } catch {
+      // Reuse the last identified session; without one, skip an ambiguous warning.
     }
+    if (!sessionId || warnedUsageSessionIds.has(sessionId)) return;
+    warnedUsageSessionIds.add(sessionId);
     try {
       safeNotify(ctx, `pruner: could not record summarizer usage: ${errorMessage(error)}`, "warning");
     } catch {
