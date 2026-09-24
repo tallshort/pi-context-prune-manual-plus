@@ -132,6 +132,12 @@ export default function (pi: ExtensionAPI) {
     }
     if (sessionId) {
       if (warnedUsageSessionIds.has(sessionId)) return;
+      // A transient identity failure may already have emitted this session's
+      // warning under manager identity. Transfer that marker without warning again.
+      if (warnedUnknownUsageSessions.delete(session)) {
+        warnedUsageSessionIds.add(sessionId);
+        return;
+      }
       warnedUsageSessionIds.add(sessionId);
     } else {
       if (warnedUnknownUsageSessions.has(session)) return;

@@ -180,6 +180,25 @@ describe("flush usage accounting", () => {
     expect(JSON.parse(sidecar)).toMatchObject({ sessionId: "", usageEntryId: "usage-1" });
   });
 
+  it("does not warn twice when a session identity lookup recovers", async () => {
+    let lookupFails = true;
+    const appendUsage = vi.fn(() => { throw new Error("session usage failed"); });
+    const { ctx } = setup([response("short summary"), response("short summary")], appendUsage);
+    ctx.sessionManager.getSessionId = () => {
+      if (lookupFails) throw new Error("session id unavailable");
+      return "session-1";
+    };
+
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-1", 7)] });
+    lookupFails = false;
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-2", 8)] });
+
+    const usageWarnings = ctx.ui.notify.mock.calls.filter(([message]: [string]) =>
+      message.includes("could not record summarizer usage"),
+    );
+    expect(usageWarnings).toHaveLength(1);
+  });
+
   it("warns again when one session manager moves to a different identified session", async () => {
     let sessionId = "session-1";
     const appendUsage = vi.fn(() => { throw new Error("session usage failed"); });
