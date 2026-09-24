@@ -39,13 +39,13 @@ const usage = {
   cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
 };
 
-function batch(rawChars: number): CapturedBatch {
+function batch(rawChars: number, toolCallId = "call-1", turnIndex = 7): CapturedBatch {
   return {
-    turnIndex: 7,
+    turnIndex,
     timestamp: 1,
     assistantText: "",
     toolCalls: [{
-      toolCallId: "call-1",
+      toolCallId,
       toolName: "read",
       args: {},
       resultText: "x".repeat(rawChars),
@@ -54,7 +54,7 @@ function batch(rawChars: number): CapturedBatch {
   };
 }
 
-function response(summary: string) {
+function response(summary: string, overrides: Record<string, unknown> = {}) {
   return {
     role: "assistant",
     content: [{ type: "text", text: summary }],
@@ -64,33 +64,44 @@ function response(summary: string) {
     usage,
     stopReason: "stop",
     timestamp: 1,
+    ...overrides,
   };
 }
 
-function setup(summary: string, appendUsage: ReturnType<typeof vi.fn>) {
+type FinalResponse = ReturnType<typeof response>;
+
+function setup(
+  responses: FinalResponse | FinalResponse[],
+  appendUsage: ReturnType<typeof vi.fn>,
+  options: { sendMessage?: () => void } = {},
+) {
   const entries: Array<{ customType: string; data: any }> = [];
+  const responseQueue = Array.isArray(responses) ? [...responses] : [responses];
+  const fallbackResponse = responseQueue[responseQueue.length - 1];
   const pi = {
     on: vi.fn(),
     appendEntry: vi.fn((customType: string, data: any) => {
       entries.push({ customType, data });
       return `entry-${entries.length}`;
     }),
-    sendMessage: vi.fn(),
+    sendMessage: vi.fn(options.sendMessage),
     getActiveTools: vi.fn(() => []),
     setActiveTools: vi.fn(),
   } as any;
   registerExtension(pi);
 
-  const finalResponse = response(summary);
   const ctx = {
     model: { provider: "provider", id: "requested-model" },
     modelRegistry: {
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "key" })),
       getProvider: vi.fn(() => ({
-        stream: () => ({
-          async *[Symbol.asyncIterator]() {},
-          result: async () => finalResponse,
-        }),
+        stream: () => {
+          const finalResponse = responseQueue.shift() ?? fallbackResponse;
+          return {
+            async *[Symbol.asyncIterator]() {},
+            result: async () => finalResponse,
+          };
+        },
       })),
     },
     sessionManager: {
@@ -115,7 +126,7 @@ describe("flush usage accounting", () => {
 
   it("records one Pi entry, one sidecar row, and one pruner-stats call for a successful flush", async () => {
     const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
-    const { ctx, entries } = setup("short summary", appendUsage);
+    const { ctx, entries } = setup(response("short summary"), appendUsage);
 
     const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)] });
 
@@ -139,7 +150,7 @@ describe("flush usage accounting", () => {
     writeFileSync(blockedPath, "not a directory");
     harness.agentDir = blockedPath;
     const appendUsage = vi.fn(() => { throw new Error("session usage failed"); });
-    const { ctx, entries } = setup("s".repeat(2_000), appendUsage);
+    const { ctx, entries } = setup(response("s".repeat(2_000)), appendUsage);
 
     const result = await harness.flush!(ctx, { previewedBatches: [batch(700)] });
 
@@ -153,5 +164,85 @@ describe("flush usage accounting", () => {
       expect.stringContaining("could not record summarizer usage"),
       "warning",
     ]]);
+  });
+
+  it("does not fail the flush when session-id lookup for usage reporting throws", async () => {
+    const appendUsage = vi.fn();
+    const { ctx, entries } = setup(response("short summary"), appendUsage);
+    ctx.sessionManager.getSessionId = () => { throw new Error("session id unavailable"); };
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)] });
+
+    expect(result).toMatchObject({ ok: true, reason: "flushed" });
+    expect(appendUsage).not.toHaveBeenCalled();
+    expect(latestStats(entries)).toMatchObject({ callCount: 1, totalCost: 0.1 });
+    const sidecar = readFileSync(join(harness.agentDir, "context-prune", "usage.jsonl"), "utf8");
+    expect(JSON.parse(sidecar)).toMatchObject({ sessionId: "" });
+  });
+
+  it("accounts both provider responses when a manual flush retries once", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup([
+      response("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      response("short summary"),
+    ], appendUsage);
+
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(5_000)],
+      onProgress: vi.fn(),
+    });
+
+    expect(result).toMatchObject({ ok: true, reason: "flushed" });
+    expect(appendUsage).toHaveBeenCalledTimes(2);
+    expect(latestStats(entries)).toMatchObject({ callCount: 2, retryCount: 1, totalCost: 0.2 });
+  });
+
+  it("waits for parallel responses and persists their usage when the first batch fails", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup([
+      response("", { stopReason: "error", errorMessage: "invalid request" }),
+      response("short summary"),
+    ], appendUsage);
+
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(5_000, "call-1", 7), batch(5_000, "call-2", 8)],
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "summarizer-failed" });
+    expect(appendUsage).toHaveBeenCalledTimes(2);
+    expect(latestStats(entries)).toMatchObject({ callCount: 2, finalFailureCount: 1, totalCost: 0.2 });
+  });
+
+  it("persists usage when summary persistence fails after the provider response", async () => {
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup(response("short summary"), appendUsage, {
+      sendMessage: () => { throw new Error("This extension ctx is stale"); },
+    });
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)] });
+
+    expect(result).toMatchObject({ ok: false, reason: "summarizer-failed" });
+    expect(appendUsage).toHaveBeenCalledTimes(1);
+    expect(latestStats(entries)).toMatchObject({ callCount: 1, totalCost: 0.1 });
+  });
+
+  it("retains usage from an already-started batch after soft cancellation", async () => {
+    const controller = new AbortController();
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup(response("short summary"), appendUsage);
+
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(5_000)],
+      signal: controller.signal,
+      onProgress: (_index: number, _total: number, _batch: CapturedBatch, stage: string) => {
+        if (stage === "start") controller.abort();
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, reason: "cancelled" });
+    expect(appendUsage).toHaveBeenCalledTimes(1);
+    expect(latestStats(entries)).toMatchObject({ callCount: 1, totalCost: 0.1 });
   });
 });

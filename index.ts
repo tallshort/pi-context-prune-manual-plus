@@ -121,10 +121,10 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  let usageWarningSessionId: string | undefined;
-  const notifyUsageError = (ctx: any, sessionId: string, error: unknown) => {
-    if (usageWarningSessionId === sessionId) return;
-    usageWarningSessionId = sessionId;
+  const usageWarningSessions = new WeakSet<object>();
+  const notifyUsageError = (ctx: any, session: UsageSession, error: unknown) => {
+    if (usageWarningSessions.has(session)) return;
+    usageWarningSessions.add(session);
     try {
       safeNotify(ctx, `pruner: could not record summarizer usage: ${errorMessage(error)}`, "warning");
     } catch {
@@ -236,13 +236,11 @@ export default function (pi: ExtensionAPI) {
 
     const delivery = options.delivery ?? "runtime";
     let usageSession: UsageSession;
-    let usageSessionId: string;
     let sessionManager: SessionAppender | undefined;
     try {
       // Capture the original session manager before provider work; print-mode
       // contexts may become stale while summaries are in flight.
       usageSession = ctx.sessionManager as UsageSession;
-      usageSessionId = usageSession.getSessionId();
       if (delivery === "session") sessionManager = usageSession as unknown as SessionAppender;
     } catch (err) {
       restoreBatches(batches);
@@ -255,7 +253,7 @@ export default function (pi: ExtensionAPI) {
     const reportUsage = createSummarizerUsageReporter({
       session: usageSession,
       addUsage: (usage) => statsAccum.add(usage),
-      notifyError: (error) => notifyUsageError(ctx, usageSessionId, error),
+      notifyError: (error) => notifyUsageError(ctx, usageSession, error),
     });
     const onUsage = (batch: CapturedBatch, response: import("@earendil-works/pi-ai").AssistantMessage) => {
       if (reportUsage(batch, response)) reportedUsageCount += 1;
@@ -266,7 +264,7 @@ export default function (pi: ExtensionAPI) {
         else statsAccum.persist(pi);
         persistedUsageCount = reportedUsageCount;
       } catch (err) {
-        notifyUsageError(ctx, usageSessionId, err);
+        notifyUsageError(ctx, usageSession, err);
       }
     };
 
