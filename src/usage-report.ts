@@ -32,7 +32,11 @@ export function reportSummarizerUsage(
   let sessionId = "";
   try {
     sessionId = session.getSessionId();
-    if (typeof session.appendUsage === "function") {
+  } catch (error) {
+    notifyUsageErrorSafely(notifyError, error);
+  }
+  if (typeof session.appendUsage === "function") {
+    try {
       entry = session.appendUsage(
         "context_prune",
         provider,
@@ -40,15 +44,15 @@ export function reportSummarizerUsage(
         response.usage as Usage,
         `summarizer call: ${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"} (turn ${batch.turnIndex})`,
       );
+    } catch (error) {
+      notifyUsageErrorSafely(notifyError, error);
     }
-  } catch (error) {
-    notifyUsageErrorSafely(notifyError, error);
   }
 
   try {
     writeLog({
       v: 1,
-      id: entry ? `${sessionId}:${entry.id}` : randomUUID(),
+      id: entry && sessionId ? `${sessionId}:${entry.id}` : randomUUID(),
       ts: entry?.timestamp ?? new Date().toISOString(),
       source: "context-prune",
       label: "summarizer",

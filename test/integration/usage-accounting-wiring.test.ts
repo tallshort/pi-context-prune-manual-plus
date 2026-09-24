@@ -167,17 +167,33 @@ describe("flush usage accounting", () => {
   });
 
   it("does not fail the flush when session-id lookup for usage reporting throws", async () => {
-    const appendUsage = vi.fn();
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
     const { ctx, entries } = setup(response("short summary"), appendUsage);
     ctx.sessionManager.getSessionId = () => { throw new Error("session id unavailable"); };
 
     const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)] });
 
     expect(result).toMatchObject({ ok: true, reason: "flushed" });
-    expect(appendUsage).not.toHaveBeenCalled();
+    expect(appendUsage).toHaveBeenCalledTimes(1);
     expect(latestStats(entries)).toMatchObject({ callCount: 1, totalCost: 0.1 });
     const sidecar = readFileSync(join(harness.agentDir, "context-prune", "usage.jsonl"), "utf8");
-    expect(JSON.parse(sidecar)).toMatchObject({ sessionId: "" });
+    expect(JSON.parse(sidecar)).toMatchObject({ sessionId: "", usageEntryId: "usage-1" });
+  });
+
+  it("warns again when one session manager moves to a different identified session", async () => {
+    let sessionId = "session-1";
+    const appendUsage = vi.fn(() => { throw new Error("session usage failed"); });
+    const { ctx } = setup([response("short summary"), response("short summary")], appendUsage);
+    ctx.sessionManager.getSessionId = () => sessionId;
+
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-1", 7)] });
+    sessionId = "session-2";
+    await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-2", 8)] });
+
+    const usageWarnings = ctx.ui.notify.mock.calls.filter(([message]: [string]) =>
+      message.includes("could not record summarizer usage"),
+    );
+    expect(usageWarnings).toHaveLength(2);
   });
 
   it("accounts both provider responses when a manual flush retries once", async () => {

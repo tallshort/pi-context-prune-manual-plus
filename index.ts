@@ -121,10 +121,22 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const usageWarningSessions = new WeakSet<object>();
+  const warnedUsageSessionIds = new Set<string>();
+  const warnedUnknownUsageSessions = new WeakSet<object>();
   const notifyUsageError = (ctx: any, session: UsageSession, error: unknown) => {
-    if (usageWarningSessions.has(session)) return;
-    usageWarningSessions.add(session);
+    let sessionId = "";
+    try {
+      sessionId = session.getSessionId();
+    } catch {
+      // Fall back to manager identity when the session cannot identify itself.
+    }
+    if (sessionId) {
+      if (warnedUsageSessionIds.has(sessionId)) return;
+      warnedUsageSessionIds.add(sessionId);
+    } else {
+      if (warnedUnknownUsageSessions.has(session)) return;
+      warnedUnknownUsageSessions.add(session);
+    }
     try {
       safeNotify(ctx, `pruner: could not record summarizer usage: ${errorMessage(error)}`, "warning");
     } catch {
