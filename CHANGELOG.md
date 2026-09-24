@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.0]
+
+### Added
+
+- Ported and extended upstream's [summarizer usage reporting](https://github.com/championswimmer/pi-context-prune/commit/b06e82f5cfbdeeaca81de3da99550312cabf20db) so every completed provider response with usage reaches Pi's standard session totals and a content-free pi-stats v1 sidecar, including failed, aborted, retried, and oversized summaries.
+- Link Pi usage entries and sidecar records with shared identifiers when available, while preserving the existing `/pruner stats` view with exactly-once accounting.
+
+### Fixed
+
+- Isolate usage reporting, session identity lookup, diagnostics, and sidecar failures from prune settlement.
+- Wait for every started parallel summarizer call so its usage is recorded before cumulative stats are persisted.
+- Deduplicate usage warnings per identified session across transient session-ID failures and session-manager reuse.
+
+### Changed
+
+- Resolve extension settings and usage logs from Pi's agent directory, honoring `PI_CODING_AGENT_DIR`.
+- Updated build and test dependencies.
+
 ## [1.6.2]
 
 ### Fixed
