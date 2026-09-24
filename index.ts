@@ -42,6 +42,7 @@ import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
 import { hydrateSessionState } from "./src/session-hydration.js";
+import { createSummarizerUsageReporter, type UsageSession } from "./src/usage-report.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -120,6 +121,16 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  let usageWarningSessionId: string | undefined;
+  const notifyUsageError = (ctx: any, sessionId: string, error: unknown) => {
+    if (usageWarningSessionId === sessionId) return;
+    usageWarningSessionId = sessionId;
+    try {
+      safeNotify(ctx, `pruner: could not record summarizer usage: ${errorMessage(error)}`, "warning");
+    } catch {
+      // Usage diagnostics must never change the flush result.
+    }
+  };
   const assistantMessageHasToolCalls = (message: any) =>
     message?.role === "assistant" &&
     Array.isArray(message.content) &&
@@ -224,16 +235,40 @@ export default function (pi: ExtensionAPI) {
     isFlushing = true;
 
     const delivery = options.delivery ?? "runtime";
+    let usageSession: UsageSession;
+    let usageSessionId: string;
     let sessionManager: SessionAppender | undefined;
-    if (delivery === "session") {
-      try {
-        sessionManager = ctx.sessionManager as unknown as SessionAppender;
-      } catch (err) {
-        restoreBatches(batches);
-        isFlushing = false;
-        return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
-      }
+    try {
+      // Capture the original session manager before provider work; print-mode
+      // contexts may become stale while summaries are in flight.
+      usageSession = ctx.sessionManager as UsageSession;
+      usageSessionId = usageSession.getSessionId();
+      if (delivery === "session") sessionManager = usageSession as unknown as SessionAppender;
+    } catch (err) {
+      restoreBatches(batches);
+      isFlushing = false;
+      return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
     }
+
+    let reportedUsageCount = 0;
+    let persistedUsageCount = 0;
+    const reportUsage = createSummarizerUsageReporter({
+      session: usageSession,
+      addUsage: (usage) => statsAccum.add(usage),
+      notifyError: (error) => notifyUsageError(ctx, usageSessionId, error),
+    });
+    const onUsage = (batch: CapturedBatch, response: import("@earendil-works/pi-ai").AssistantMessage) => {
+      if (reportUsage(batch, response)) reportedUsageCount += 1;
+    };
+    const persistStats = () => {
+      try {
+        if (delivery === "session") sessionManager!.appendCustomEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
+        else statsAccum.persist(pi);
+        persistedUsageCount = reportedUsageCount;
+      } catch (err) {
+        notifyUsageError(ctx, usageSessionId, err);
+      }
+    };
 
     const appendEntry = (customType: string, data?: unknown) => sessionManager!.appendCustomEntry(customType, data);
     const appendSummaryMessage = (content: string, details: unknown) =>
@@ -281,6 +316,7 @@ export default function (pi: ExtensionAPI) {
                 // Manual cancellation is soft: finish already-started calls so their
                 // completed summaries can still be indexed, but do not start another.
                 signal: undefined,
+                onUsage: (response) => onUsage(batch, response),
                 notifyOnFailure: false,
                 onTextProgress: (receivedChars) => reportBatchTextProgress(index, batches.length, batch, receivedChars),
               });
@@ -324,6 +360,7 @@ export default function (pi: ExtensionAPI) {
           ? []
           : await summarizeBatches(batchesToSummarize, currentConfig.value, ctx, {
               onBatchTextProgress: reportBatchTextProgress,
+              onUsage,
               signal: options.signal,
             });
         let summarizedIndex = 0;
@@ -366,7 +403,6 @@ export default function (pi: ExtensionAPI) {
         const summaryRefs = indexer.allocateSummaryRefs(batch);
         const summaryText = wrapSummaryForContext(result.summaryText + formatSummaryToolCallRefs(summaryRefs));
         const shouldSkipOversized = summaryText.length > batchRawCharCount;
-        statsAccum.add(result.usage);
         totalRawCharCount += batchRawCharCount;
         totalSummaryCharCount += summaryText.length;
         totalToolCallCount += batch.toolCalls.length;
@@ -429,12 +465,7 @@ export default function (pi: ExtensionAPI) {
 
       if (processedBatches.length === 0) {
         // Retry/failure counters are durable even when no batch produced a summary.
-        try {
-          if (delivery === "runtime") statsAccum.persist(pi);
-          else appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
-        } catch {
-          // Session/index persistence failures stay pending and are never retried here.
-        }
+        persistStats();
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
         return { ok: false, reason: wasCancelled ? "cancelled" : "summarizer-failed" };
       }
@@ -451,12 +482,7 @@ export default function (pi: ExtensionAPI) {
       if (frontierBatches.length === 0) {
         // Completed batches may be indexed behind a cancellation hole. Their
         // frontier cannot advance yet, but their cumulative stats are durable.
-        try {
-          if (delivery === "runtime") statsAccum.persist(pi);
-          else appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
-        } catch {
-          // Keep the existing cancellation result even if stats persistence fails.
-        }
+        persistStats();
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
         return {
           ok: true,
@@ -485,19 +511,14 @@ export default function (pi: ExtensionAPI) {
         if (delivery === "runtime") {
           frontier.advance(frontierSnapshot);
           frontier.persist(pi);
-          statsAccum.persist(pi);
         } else {
           frontier.advance(frontierSnapshot);
           appendEntry(CUSTOM_TYPE_FRONTIER, frontierSnapshot);
-          try {
-            appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
-          } catch {
-            // Ignore stats persistence failures; the prune result and frontier are the contract.
-          }
         }
       } catch (err) {
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
+      persistStats();
 
       setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
 
@@ -537,6 +558,9 @@ export default function (pi: ExtensionAPI) {
       safeNotify(ctx, `pruner: summarization failed: ${errorMessage(err)}`, "error");
       return { ok: false, reason: "failed", error: errorMessage(err) };
     } finally {
+      // Most result paths persist stats during settlement. Exceptional abort or
+      // stale-context paths still persist any provider usage reported meanwhile.
+      if (reportedUsageCount > persistedUsageCount) persistStats();
       isFlushing = false;
     }
   };

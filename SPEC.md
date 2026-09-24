@@ -69,6 +69,8 @@ Flush delivery has two modes:
 - **runtime** delivery uses Pi's runtime-safe message path during active agent/tool execution;
 - **session** delivery writes directly to the session when runtime APIs may no longer be available.
 
+Every final summarizer provider response carrying usage is accounted once at response completion, independently of summary acceptance or later persistence. A distinct retry response is a distinct paid call. The accounting boundary updates the pruner's cumulative stats, appends Pi's standard usage entry when supported, and writes the content-free pi-stats sidecar; failures in usage reporting must not change flush settlement.
+
 Index records, summaries, frontier snapshots, and statistics are persisted as session custom entries. Session start and branch changes reconstruct the in-memory index and statistics from the active branch.
 
 ## 7. Manual-prune cancellation

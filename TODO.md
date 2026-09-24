@@ -19,6 +19,7 @@ Future improvements that preserve the core context-pruning algorithm.
 - [ ] Add a token-count threshold for pruning once reliable per-tool-result token counts are available.
 ## Visibility and maintenance
 
+- [ ] Report summarizer usage through Pi usage entries and the pi-stats sidecar while preserving exactly-once `/pruner stats` accounting.
 - [ ] Improve savings reporting with compression ratio and raw/summary character totals alongside the current cost estimate.
 - [ ] Add index maintenance commands: export, clear, and filter pruned records by turn or tool name.
 - [x] Deliver a focusable `/pruner now` overlay with concurrent batch progress, soft cancellation, and automatic close after processing (manually verified by the user).

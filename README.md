@@ -227,7 +227,7 @@ The extension registers the `/pruner` command:
 9. **Batching mode** — switch between per-turn and per-agent-message summaries
 10. **Manual concurrency** — set `/pruner now` simultaneous summary calls from 1 to 16 (default 8)
 
-All changes are saved immediately to `~/.pi/agent/context-prune/settings.json` and reflected in the footer status widget when it is enabled.
+All changes are saved immediately to `<agentDir>/context-prune/settings.json` (normally `~/.pi/agent/context-prune/settings.json`, honoring `PI_CODING_AGENT_DIR`) and reflected in the footer status widget when it is enabled.
 
 ## Tools
 
@@ -257,7 +257,7 @@ The tool is guided by a system prompt that instructs the model to use it after c
 
 ## Configuration
 
-Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-independent):
+Config is stored in `<agentDir>/context-prune/settings.json` (normally `~/.pi/agent/context-prune/settings.json`, global and project-independent):
 
 ```json
 {
@@ -328,7 +328,7 @@ Set it with:
 /pruner settings
 ```
 
-Or directly in `~/.pi/agent/context-prune/settings.json`:
+Or directly in `<agentDir>/context-prune/settings.json`:
 
 ```json
 {
@@ -346,18 +346,20 @@ index.ts                    — TypeScript source entry point, wires events + mo
 dist/index.js               — generated ESM bundle shipped in the npm package
 src/
   types.ts                  — shared types, constants, PruneOn modes
-  config.ts                 — load/save ~/.pi/agent/context-prune/settings.json
-  batch-capture.ts          — capture turn_end/session-branch tool results → CapturedBatch
-  summarizer.ts             — resolve model, stream LLM summaries, return usage
-  indexer.ts                — Map<toolCallId, ToolCallRecord> + session persistence
-  pruner.ts                 — filter context event messages
-  reminder.ts               — append <pruner-note> count hints in agentic-auto mode
-  summary-refs.ts           — short ref generation + summary wrapper/details helpers
-  progress-text.ts          — shared live progress text formatter
-  query-tool.ts             — context_tree_query tool registration
-  context-prune-tool.ts     — context_prune tool registration (agentic-auto)
-  frontier.ts               — persisted prune-frontier tracker for last attempted prune boundary
-  stats.ts                  — StatsAccumulator for cumulative token/cost tracking
+  config.ts                 — load/save <agentDir>/context-prune/settings.json
+  batch-capture.ts           — capture turn_end/session-branch tool results → CapturedBatch
+  summarizer.ts              — resolve model, stream LLM summaries, report final usage
+  indexer.ts                 — Map<toolCallId, ToolCallRecord> + session persistence
+  pruner.ts                  — filter context event messages
+  reminder.ts                — append <pruner-note> count hints in agentic-auto mode
+  summary-refs.ts            — short ref generation + summary wrapper/details helpers
+  progress-text.ts           — shared live progress text formatter
+  query-tool.ts              — context_tree_query tool registration
+  context-prune-tool.ts      — context_prune tool registration (agentic-auto)
+  frontier.ts                — persisted prune-frontier tracker for last attempted prune boundary
+  stats.ts                   — StatsAccumulator for cumulative token/cost tracking
+  usage-report.ts            — report provider usage to Pi and link it to the sidecar
+  usage-log.ts               — normalized pi-stats v1 usage sidecar writer
   tree-browser.ts           — foldable tree browser for /pruner tree
   commands.ts               — /pruner command, settings overlay, widgets, and message renderer
 ```
@@ -366,7 +368,7 @@ src/
 
 ```
 session_start
-  └─► loadConfig()              read ~/.pi/agent/context-prune/settings.json
+  └─► loadConfig()              read <agentDir>/context-prune/settings.json
   └─► indexer.reconstruct()     rebuild Map from session branch entries
   └─► statsAccum.reconstruct()  rebuild stats from session branch entries
   └─► frontier.reconstruct()    rebuild last prune-attempt boundary from session entries
@@ -411,7 +413,8 @@ flushPending()
   └─► compare summary chars vs raw tool-result chars
   └─► if smaller: persist index + hidden summary, then advance frontier
   └─► if larger: keep original tool results, skip summary/index writes, still advance frontier
-  └─► statsAccum.add()/persist() accumulate token/cost stats for the summarizer call
+  └─► onUsage()                account each final provider response exactly once, even when its summary is discarded
+  └─► statsAccum.persist()     persist `/pruner stats` tokens/cost plus retry, failure, and pruning metrics
 
 context
   └─► pruneMessages()            remove summarized toolResult messages from future context
@@ -423,7 +426,8 @@ before_agent_start (agentic-auto mode)
 
 ### Session persistence
 
-- **Config** lives in `~/.pi/agent/context-prune/settings.json` — the extension's own file, independent of Pi's project settings
+- **Config** lives in `<agentDir>/context-prune/settings.json` (normally `~/.pi/agent/`, honoring `PI_CODING_AGENT_DIR`) — independent of Pi's project settings
+- **Summarizer usage** is recorded once per final provider response that carries usage, including failed, aborted, retried, or oversized summaries. Pi `type: "usage"` entries drive its footer and `/session`; `<agentDir>/context-prune/usage.jsonl` (plus rotated `.1`) is a content-free pi-stats v1 sidecar. Both records share `<sessionId>:<usageEntryId>` when Pi returns an entry, allowing consumers to de-duplicate them. `/pruner stats` remains a separate cumulative snapshot and is updated through the same exactly-once callback. Older pi-stats versions that read both channels may double-count until they support shared-id de-duplication; `PI_STATS_DISABLE_USAGE_SIDECARS=1` disables sidecar ingestion.
 - **Index** is persisted via `pi.appendEntry("context-prune-index", { toolCalls })` — one entry per summarized batch, NOT in LLM context
 - **Prune frontier** is persisted via `pi.appendEntry("context-prune-frontier", ...)` — it records the last attempted prune boundary even when an oversized summary is rejected
 - **Summaries** are injected as hidden `custom_message` entries with `customType: "context-prune-summary"` — these ARE in LLM context (replacing the raw outputs only when pruning is accepted) but are not rendered into Pi's main message window. Their text uses short refs, while the `details.toolCallRefs` metadata keeps the full `toolCallId` mapping for later recovery.
