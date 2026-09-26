@@ -4,6 +4,7 @@ import {
   type CapturedBatch,
   type FlushOptions,
   type ManualPruneProgressDetail,
+  type ManualPruneProgressStage,
   PRUNE_ON_MODES,
   BATCHING_MODES,
   STATUS_WIDGET_ID,
@@ -405,598 +406,675 @@ class PruneProgressOverlay extends Container implements Focusable {
 
 // ── Command registration ────────────────────────────────────────────────────
 
+type CommandFlushResult =
+  | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
+  | { ok: false; reason: string; error?: string };
+
+type FlushPending = (
+  ctx: ExtensionCommandContext,
+  options?: FlushOptions,
+) => Promise<CommandFlushResult>;
+
+interface CommandDependencies {
+  currentConfig: { value: ContextPruneConfig };
+  flushPending: FlushPending;
+  capturePendingBatches: (ctx: ExtensionCommandContext) => CapturedBatch[];
+  syncToolActivation: () => void;
+  getStats: () => SummarizerStats;
+  indexer: ToolCallIndexer;
+}
+
+type PrunerCommandHandler = (
+  subArgs: string[],
+  ctx: ExtensionCommandContext,
+  deps: CommandDependencies,
+) => void | Promise<void>;
+
+type SettingsUpdater = (
+  config: ContextPruneConfig,
+  value: string,
+  items: SettingItem[],
+) => boolean;
+
+function updateSettingDescription(items: SettingItem[], id: string, description: string): void {
+  const item = items.find((candidate) => candidate.id === id);
+  if (item) item.description = description;
+}
+
+const SETTINGS_UPDATERS: Readonly<Record<string, SettingsUpdater>> = {
+  enabled: (config, value) => {
+    config.enabled = value === "true";
+    return true;
+  },
+  showPruneStatusLine: (config, value, items) => {
+    config.showPruneStatusLine = value === "true";
+    updateSettingDescription(items, "showPruneStatusLine", pruneStatusLineDescription(config));
+    return true;
+  },
+  showStartupNotice: (config, value, items) => {
+    config.showStartupNotice = value === "true";
+    updateSettingDescription(items, "showStartupNotice", startupNoticeDescription(config));
+    return true;
+  },
+  pruneOn: (config, value, items) => {
+    config.pruneOn = value as ContextPruneConfig["pruneOn"];
+    updateSettingDescription(items, "pruneOn", pruneTriggerDescription(config.pruneOn));
+    updateSettingDescription(items, "remindUnprunedCount", remindUnprunedCountDescription(config));
+    return true;
+  },
+  summarizerModel: (config, value) => {
+    config.summarizerModel = value;
+    return true;
+  },
+  summarizerThinking: (config, value, items) => {
+    config.summarizerThinking = value as ContextPruneConfig["summarizerThinking"];
+    updateSettingDescription(items, "summarizerThinking", summarizerThinkingDescription(config.summarizerThinking));
+    return true;
+  },
+  remindUnprunedCount: (config, value, items) => {
+    config.remindUnprunedCount = value === "true";
+    updateSettingDescription(items, "remindUnprunedCount", remindUnprunedCountDescription(config));
+    updateSettingDescription(items, "pruneOn", pruneTriggerDescription(config.pruneOn));
+    return true;
+  },
+  minRawCharsThreshold: (config, value, items) => {
+    const threshold = parseMinRawCharsThreshold(value);
+    if (threshold === null) return false;
+    config.minRawCharsThreshold = threshold;
+    updateSettingDescription(items, "minRawCharsThreshold", rawCharThresholdDescription(threshold));
+    return true;
+  },
+  batchingMode: (config, value, items) => {
+    config.batchingMode = value as ContextPruneConfig["batchingMode"];
+    updateSettingDescription(items, "batchingMode", batchingModeDescription(config.batchingMode));
+    return true;
+  },
+  manualPruneConcurrency: (config, value, items) => {
+    const concurrency = parseManualPruneConcurrency(value);
+    if (concurrency === null) return false;
+    config.manualPruneConcurrency = concurrency;
+    updateSettingDescription(items, "manualPruneConcurrency", manualPruneConcurrencyDescription(concurrency));
+    return true;
+  },
+};
+
+function applySettingChange(config: ContextPruneConfig, items: SettingItem[], id: string, value: string): boolean {
+  return SETTINGS_UPDATERS[id]?.(config, value, items) ?? true;
+}
+
+async function handleSettingsCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): Promise<void> {
+  const { currentConfig, syncToolActivation, getStats } = deps;
+  const config = currentConfig.value;
+  const availableModels = ctx.modelRegistry?.getAvailable() ?? [];
+
+  const thresholdValues = [...new Set([...RAW_CHAR_THRESHOLD_PRESETS, config.minRawCharsThreshold])]
+    .sort((a, b) => a - b)
+    .map(String);
+  const concurrencyValues = [...new Set([...MANUAL_PRUNE_CONCURRENCY_PRESETS, config.manualPruneConcurrency])]
+    .sort((a, b) => a - b)
+    .map(String);
+  const items: SettingItem[] = [
+    {
+      id: "enabled",
+      label: "Enabled",
+      values: ["true", "false"],
+      currentValue: String(config.enabled),
+      description: "Enable or disable context pruning",
+    },
+    {
+      id: "showPruneStatusLine",
+      label: "Prune status line",
+      values: ["true", "false"],
+      currentValue: String(config.showPruneStatusLine),
+      description: pruneStatusLineDescription(config),
+    },
+    {
+      id: "showStartupNotice",
+      label: "Startup notice",
+      values: ["true", "false"],
+      currentValue: String(config.showStartupNotice),
+      description: startupNoticeDescription(config),
+    },
+    {
+      id: "pruneOn",
+      label: "Prune trigger",
+      values: PRUNE_ON_MODES.map((m) => m.value),
+      currentValue: config.pruneOn,
+      description: pruneTriggerDescription(config.pruneOn),
+    },
+    {
+      id: "summarizerModel",
+      label: "Summarizer model",
+      values: [config.summarizerModel], // show current value as the cycling option
+      currentValue: config.summarizerModel,
+      description: "Model used for summarizing tool outputs — press Enter to browse models",
+      submenu: (currentValue: string, done: (newValue?: string) => void) => {
+        const modelItems: SettingItem[] = [
+          {
+            id: "default",
+            label: "default (active model)",
+            values: ["default"],
+            currentValue: currentValue === "default" ? "default" : "",
+            description: "Use the currently active model for summarization",
+          },
+          ...availableModels.map((m) => {
+            const displayId = `${m.provider}/${m.id}`;
+            return {
+              id: displayId,
+              label: displayId,
+              values: [displayId],
+              currentValue: currentValue === displayId ? displayId : "",
+              description: m.name || displayId,
+            };
+          }),
+        ];
+        return new SettingsList(
+          modelItems,
+          15,
+          getSettingsListTheme(),
+          (_id: string, newValue: string) => done(newValue),
+          () => done(undefined), // onCancel — ESC closes submenu, returns to parent
+          { enableSearch: true },
+        );
+      },
+    },
+    {
+      id: "summarizerThinking",
+      label: "Summarizer thinking",
+      values: SUMMARIZER_THINKING_LEVELS.map((level) => level.value),
+      currentValue: config.summarizerThinking,
+      description: summarizerThinkingDescription(config.summarizerThinking),
+    },
+    {
+      id: "remindUnprunedCount",
+      label: "Remind unpruned count",
+      values: ["true", "false"],
+      currentValue: String(config.remindUnprunedCount),
+      description: remindUnprunedCountDescription(config),
+    },
+    {
+      id: "minRawCharsThreshold",
+      label: "Min raw chars",
+      values: thresholdValues,
+      currentValue: String(config.minRawCharsThreshold),
+      description: rawCharThresholdDescription(config.minRawCharsThreshold),
+    },
+    {
+      id: "batchingMode",
+      label: "Batching mode",
+      values: BATCHING_MODES.map((m) => m.value),
+      currentValue: config.batchingMode,
+      description: batchingModeDescription(config.batchingMode),
+    },
+    {
+      id: "manualPruneConcurrency",
+      label: "Manual concurrency",
+      values: concurrencyValues,
+      currentValue: String(config.manualPruneConcurrency),
+      description: manualPruneConcurrencyDescription(config.manualPruneConcurrency),
+    },
+  ];
+
+  let settingsList: SettingsList;
+  let closeSettingsOverlay = () => {};
+
+  const onChange = (id: string, newValue: string) => {
+    const newConfig = { ...currentConfig.value };
+    if (!applySettingChange(newConfig, items, id, newValue)) return;
+
+    currentConfig.value = newConfig;
+    saveConfig(newConfig);
+    setPruneStatusWidget(ctx, newConfig, getStats());
+    settingsList?.invalidate();
+    // Toggle context_prune tool activation when config changes
+    syncToolActivation();
+  };
+
+  settingsList = new SettingsList(
+    items,
+    10,
+    getSettingsListTheme(),
+    onChange,
+    () => closeSettingsOverlay(), // onCancel — close the custom overlay
+    { enableSearch: false },
+  );
+
+  // Use ctx.ui.custom() to show the settings list as an overlay.
+  // The factory receives (tui, theme, keybindings, done) and returns a Component.
+  // Wire Escape through the SettingsList constructor's onCancel callback instead
+  // of mutating private SettingsList fields.
+  await ctx.ui.custom(
+    (_tui, _theme, _keybindings, done) => {
+      closeSettingsOverlay = () => done(undefined);
+      return new SettingsOverlay("pruner settings", settingsList);
+    },
+    {
+      overlay: true,
+      overlayOptions: { width: 60 },
+    },
+  );
+}
+
+function setPruningEnabled(enabled: boolean, ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig, syncToolActivation, getStats } = deps;
+  currentConfig.value = { ...currentConfig.value, enabled };
+  saveConfig(currentConfig.value);
+  ctx.ui.notify(`Context pruning ${enabled ? "enabled" : "disabled"}.`);
+  setPruneStatusWidget(ctx, currentConfig.value, getStats());
+  syncToolActivation();
+}
+
+function handleOnCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  setPruningEnabled(true, ctx, deps);
+}
+
+function handleOffCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  setPruningEnabled(false, ctx, deps);
+}
+
+function handleStatusCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig, getStats } = deps;
+  const cfg = currentConfig.value;
+  const mode = PRUNE_ON_MODES.find((m) => m.value === cfg.pruneOn)?.label ?? cfg.pruneOn;
+  const s = getStats();
+  const statsLine = s.callCount > 0
+    ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
+    : "\n  (no summarizer calls yet)";
+  ctx.ui.notify(
+    `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min chars: ${cfg.minRawCharsThreshold.toLocaleString()} (${cfg.minRawCharsThreshold === 0 ? "off" : "skip at or below"})\n  concurrency: ${cfg.manualPruneConcurrency} (/pruner now)\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
+  );
+}
+
+async function handleTreeCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): Promise<void> {
+  const { indexer } = deps;
+  const roots = buildPruneTree(ctx, indexer);
+  if (roots.length === 0) {
+    ctx.ui.notify("No pruned tool calls found in this session.", "info");
+    return;
+  }
+
+  await ctx.ui.custom(
+    (_tui, theme, _keybindings, done) => {
+      const browser = new TreeBrowser(roots, theme, () => done(undefined));
+      return browser;
+    },
+    {
+      overlay: true,
+      overlayOptions: { width: "80%", maxHeight: "70%", anchor: "center" },
+    },
+  );
+}
+
+function handleStatsCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { getStats } = deps;
+  const s = getStats();
+  if (s.callCount === 0 && s.retryCount === 0 && s.finalFailureCount === 0) {
+    ctx.ui.notify("pruner stats: no summarizer calls yet.");
+  } else {
+    ctx.ui.notify(
+      `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}\n  retries:     ${s.retryCount}\n  failed:      ${s.finalFailureCount}\n  failures:    rate-limit ${s.failureCounts["rate-limit"]}, network ${s.failureCounts.network}, provider ${s.failureCounts.provider}, persistence ${s.failureCounts.persistence}, cancelled ${s.failureCounts.cancelled}${formatTheoreticalSavings(s, ctx.model) ? `\n  saved:       ${formatTheoreticalSavings(s, ctx.model)}` : ""}`,
+    );
+  }
+}
+
+function handleModelCommand(subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig } = deps;
+  const modelArg = subArgs[0];
+  if (!modelArg) {
+    ctx.ui.notify(
+      `Current summarizer model: ${currentConfig.value.summarizerModel}\nCurrent summarizer thinking: ${summarizerThinkingLabel(currentConfig.value.summarizerThinking)} (${currentConfig.value.summarizerThinking})`,
+    );
+  } else {
+    const parsed = parseModelAndThinkingArg(modelArg);
+    if (parsed.error) {
+      ctx.ui.notify(parsed.error, "warning");
+      return;
+    }
+    currentConfig.value = {
+      ...currentConfig.value,
+      summarizerModel: parsed.model,
+      summarizerThinking: parsed.thinking ?? currentConfig.value.summarizerThinking,
+    };
+    saveConfig(currentConfig.value);
+    const thinkingText = parsed.thinking ? ` with thinking ${parsed.thinking}` : "";
+    ctx.ui.notify(`Summarizer model set to: ${parsed.model}${thinkingText}`);
+  }
+}
+
+function handleThinkingCommand(subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig } = deps;
+  const thinkingArg = subArgs[0];
+  if (!thinkingArg) {
+    ctx.ui.notify(
+      `Current summarizer thinking: ${summarizerThinkingLabel(currentConfig.value.summarizerThinking)} (${currentConfig.value.summarizerThinking})`,
+    );
+    return;
+  }
+  if (SUMMARIZER_THINKING_LEVELS.some((level) => level.value === thinkingArg)) {
+    currentConfig.value = {
+      ...currentConfig.value,
+      summarizerThinking: thinkingArg as ContextPruneConfig["summarizerThinking"],
+    };
+  } else {
+    ctx.ui.notify(
+      `Invalid summarizer thinking level: ${thinkingArg}. Use one of: ${SUMMARIZER_THINKING_LEVELS.map((level) => level.value).join(", ")}.`,
+      "warning",
+    );
+    return;
+  }
+  saveConfig(currentConfig.value);
+  ctx.ui.notify(`Summarizer thinking set to: ${currentConfig.value.summarizerThinking}`);
+}
+
+async function handlePruneOnCommand(subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): Promise<void> {
+  const { currentConfig, syncToolActivation, getStats } = deps;
+  const modeArg = subArgs[0];
+  if (!modeArg) {
+    const options = PRUNE_ON_MODES.map((m) => `${m.value} — ${m.label}`);
+    const choice = await ctx.ui.select("pruner — choose when to trigger summarization", options);
+    if (!choice) return;
+    // Extract the value (first word) from "every-turn — Every turn"
+    const chosenValue = choice.split(/\s+/)[0] as ContextPruneConfig["pruneOn"];
+    currentConfig.value = { ...currentConfig.value, pruneOn: chosenValue };
+  } else {
+    currentConfig.value = { ...currentConfig.value, pruneOn: modeArg as ContextPruneConfig["pruneOn"] };
+  }
+  saveConfig(currentConfig.value);
+  setPruneStatusWidget(ctx, currentConfig.value, getStats());
+  syncToolActivation();
+}
+
+async function handleBatchingCommand(subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): Promise<void> {
+  const { currentConfig } = deps;
+  const batchArg = subArgs[0];
+  if (!batchArg) {
+    const options = BATCHING_MODES.map((m) => `${m.value} — ${m.label}`);
+    const choice = await ctx.ui.select("pruner — choose batching granularity", options);
+    if (!choice) return;
+    const chosenValue = choice.split(/\s+/)[0] as ContextPruneConfig["batchingMode"];
+    currentConfig.value = { ...currentConfig.value, batchingMode: chosenValue };
+  } else {
+    if (!BATCHING_MODES.some((m) => m.value === batchArg)) {
+      ctx.ui.notify(
+        `Invalid batching mode: ${batchArg}. Use one of: ${BATCHING_MODES.map((m) => m.value).join(", ")}.`,
+        "warning",
+      );
+      return;
+    }
+    currentConfig.value = { ...currentConfig.value, batchingMode: batchArg as ContextPruneConfig["batchingMode"] };
+  }
+  saveConfig(currentConfig.value);
+  ctx.ui.notify(`Batching mode set to: ${batchingModeLabel(currentConfig.value.batchingMode)}`);
+}
+
+function handleManualConcurrencyCommand(subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig } = deps;
+  const concurrencyArg = subArgs[0];
+  if (!concurrencyArg) {
+    ctx.ui.notify(
+      `Manual prune concurrency: ${currentConfig.value.manualPruneConcurrency}\n${manualPruneConcurrencyDescription(currentConfig.value.manualPruneConcurrency)}`,
+      "info",
+    );
+    return;
+  }
+  const concurrency = parseManualPruneConcurrency(concurrencyArg);
+  if (concurrency === null) {
+    ctx.ui.notify(`Invalid concurrency: ${concurrencyArg}. Use an integer from ${MANUAL_PRUNE_CONCURRENCY_MIN} to ${MANUAL_PRUNE_CONCURRENCY_MAX}.`, "error");
+    return;
+  }
+  currentConfig.value = { ...currentConfig.value, manualPruneConcurrency: concurrency };
+  saveConfig(currentConfig.value);
+  ctx.ui.notify(`Manual prune concurrency set to: ${concurrency}`);
+}
+
+function handleMinRawCharsCommand(subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig } = deps;
+  const thresholdArg = subArgs[0];
+  if (!thresholdArg) {
+    ctx.ui.notify(
+      `Min raw chars threshold: ${currentConfig.value.minRawCharsThreshold.toLocaleString()}\n${rawCharThresholdDescription(currentConfig.value.minRawCharsThreshold)}`,
+      "info",
+    );
+    return;
+  }
+  const threshold = parseMinRawCharsThreshold(thresholdArg);
+  if (threshold === null) {
+    ctx.ui.notify("Invalid min raw chars threshold. Use a non-negative integer; 0 disables skipping.", "warning");
+    return;
+  }
+  currentConfig.value = { ...currentConfig.value, minRawCharsThreshold: threshold };
+  saveConfig(currentConfig.value);
+  ctx.ui.notify(`Min raw chars threshold set to: ${threshold.toLocaleString()}\n${rawCharThresholdDescription(threshold)}`);
+}
+
+function handleDryRunCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): void {
+  const { currentConfig, capturePendingBatches, getStats } = deps;
+  const preview = calculateDryRunPreview(
+    capturePendingBatches(ctx),
+    currentConfig.value.minRawCharsThreshold,
+    getStats(),
+  );
+  if (preview.batchCount === 0) {
+    ctx.ui.notify("pruner dry-run: nothing pending — no batches to summarize", "info");
+    return;
+  }
+  const estimate = preview.estimatedSavingsCharCount === undefined
+    ? "  estimate:    unavailable (no accepted summary history)"
+    : `  estimate:    ~${preview.estimatedSavingsCharCount.toLocaleString()} chars saved; ~${preview.estimatedSummaryCharCount!.toLocaleString()} summary chars`;
+  ctx.ui.notify(
+    `pruner dry-run (no changes made):\n  pending:     ${preview.batchCount} batches, ${preview.toolCallCount} tool calls, ${preview.rawCharCount.toLocaleString()} raw chars\n  candidates:  ${preview.candidateBatchCount} batches, ${preview.candidateToolCallCount} tool calls, ${preview.candidateRawCharCount.toLocaleString()} raw chars\n  threshold:   ${preview.skippedBatchCount} skipped, ${preview.skippedRawCharCount.toLocaleString()} raw chars${preview.skippedBatchCount === 0 ? "" : ` (at or below ${currentConfig.value.minRawCharsThreshold.toLocaleString()})`}\n${estimate}`,
+    "info",
+  );
+}
+const PROGRESS_ROW_STATUS: Readonly<Record<ManualPruneProgressStage, RowStatus>> = {
+  start: "running",
+  retry: "retrying",
+  done: "done",
+  failed: "failed",
+  skipped: "skipped",
+};
+
+function updateManualProgressRow(
+  overlay: PruneProgressOverlay | undefined,
+  index: number,
+  stage: ManualPruneProgressStage,
+  detail?: ManualPruneProgressDetail,
+): void {
+  const status = PROGRESS_ROW_STATUS[stage];
+  overlay?.updateRow(index, status, stage === "start" ? 0 : undefined, detail);
+}
+
+type FailedFlushResult = Extract<Awaited<ReturnType<FlushPending>>, { ok: false }>;
+type SuccessfulFlushResult = Extract<Awaited<ReturnType<FlushPending>>, { ok: true }>;
+
+function notifyFailedManualPrune(ctx: ExtensionCommandContext, signal: AbortSignal, result: FailedFlushResult): void {
+  const suffix = result.error ? ` (${result.error})` : "";
+  const message = signal.aborted || result.reason === "cancelled"
+    ? "pruner: cancelled before any batch completed; all work remains pending"
+    : `pruner: nothing flushed — ${result.reason}${suffix}`;
+  ctx.ui.notify(message, result.reason === "empty" ? "info" : "warning");
+}
+
+function notifyCancelledManualPrune(ctx: ExtensionCommandContext, batches: CapturedBatch[], result: SuccessfulFlushResult): void {
+  const remaining = Math.max(0, batches.length - result.batchCount);
+  ctx.ui.notify(`pruner: cancellation complete — retained ${result.batchCount} completed batch(es); ${remaining} remain pending`, "info");
+}
+
+function notifySkippedOversizedManualPrune(ctx: ExtensionCommandContext, config: ContextPruneConfig, result: SuccessfulFlushResult): void {
+  if (!config.notifySkipped) return;
+  ctx.ui.notify(
+    `pruner: skipped pruning ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} — summary was ${result.summaryCharCount} chars vs ${result.rawCharCount} raw chars; frontier advanced past this range`,
+    "warning",
+  );
+}
+
+function notifyFlushedManualPrune(ctx: ExtensionCommandContext, result: SuccessfulFlushResult): void {
+  ctx.ui.notify(
+    `pruner: pruned ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} from ${result.batchCount} batch${result.batchCount === 1 ? "" : "es"} — summary ${result.summaryCharCount} chars vs ${result.rawCharCount} raw chars`,
+    "info",
+  );
+}
+
+function notifyManualPruneResult(
+  ctx: ExtensionCommandContext,
+  config: ContextPruneConfig,
+  batches: CapturedBatch[],
+  signal: AbortSignal,
+  result: Awaited<ReturnType<FlushPending>>,
+): void {
+  if (!result.ok) {
+    notifyFailedManualPrune(ctx, signal, result);
+    return;
+  }
+  if (result.reason === "cancelled") {
+    notifyCancelledManualPrune(ctx, batches, result);
+    return;
+  }
+  if (result.reason === "skipped-oversized") {
+    notifySkippedOversizedManualPrune(ctx, config, result);
+    return;
+  }
+  notifyFlushedManualPrune(ctx, result);
+}
+
+async function handleNowCommand(_subArgs: string[], ctx: ExtensionCommandContext, deps: CommandDependencies): Promise<void> {
+  const { currentConfig, flushPending, capturePendingBatches, getStats } = deps;
+  if (!currentConfig.value.enabled) {
+    ctx.ui.notify("Context pruning is disabled. Run /pruner on first.", "warning");
+    return;
+  }
+
+  // Capture the pending queue first so the centered overlay can pre-build its rows.
+  const batches = capturePendingBatches(ctx);
+  if (batches.length === 0) {
+    ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
+    return;
+  }
+
+  // A centered overlay owns focus for the duration of manual pruning.
+  // It displays up to sixteen rows and uses Esc for a soft stop.
+  const lifecycle = createManualPruneOverlayLifecycle();
+  let progressOverlay: PruneProgressOverlay | undefined;
+  const progressOverlayPromise = ctx.hasUI
+    ? ctx.ui.custom<void>(
+        (tui, theme, keybindings, done) => {
+          lifecycle.setClose(() => done(undefined));
+          progressOverlay = new PruneProgressOverlay(
+            tui,
+            theme,
+            batches,
+            () => lifecycle.cancel(),
+
+            (data) => keybindings.matches(data, "tui.select.cancel"),
+          );
+          return progressOverlay;
+        },
+        {
+          overlay: true,
+          overlayOptions: { width: 80, maxHeight: "80%", anchor: "center" },
+          onHandle: (handle) => handle.focus(),
+        },
+      )
+    : undefined;
+  const result = await flushPending(ctx, {
+    previewedBatches: batches,
+    signal: lifecycle.signal,
+    onProgress: (index, _total, _batch, stage, detail) => {
+      updateManualProgressRow(progressOverlay, index, stage, detail);
+    },
+    onBatchTextProgress: (index, _total, _batch, receivedChars) => {
+      progressOverlay?.updateRow(index, "running", receivedChars);
+    },
+  });
+
+  lifecycle.close();
+  await progressOverlayPromise;
+  setPruneStatusWidget(ctx, currentConfig.value, getStats());
+
+  notifyManualPruneResult(ctx, currentConfig.value, batches, lifecycle.signal, result);
+}
+
+function handleHelpCommand(_subArgs: string[], ctx: ExtensionCommandContext): void {
+  ctx.ui.notify(HELP_TEXT);
+}
+
+const COMMAND_HANDLERS: Readonly<Record<string, PrunerCommandHandler>> = {
+  "settings": handleSettingsCommand,
+  "on": handleOnCommand,
+  "off": handleOffCommand,
+  "status": handleStatusCommand,
+  "tree": handleTreeCommand,
+  "stats": handleStatsCommand,
+  "model": handleModelCommand,
+  "thinking": handleThinkingCommand,
+  "prune-on": handlePruneOnCommand,
+  "batching": handleBatchingCommand,
+  "manual-concurrency": handleManualConcurrencyCommand,
+  "min-raw-chars": handleMinRawCharsCommand,
+  "dry-run": handleDryRunCommand,
+  "now": handleNowCommand,
+  "help": handleHelpCommand,
+};
+
+async function chooseSubcommand(ctx: ExtensionCommandContext): Promise<string | undefined> {
+  const options = SUBCOMMANDS.map((subcommand) => subcommand.label);
+  const choice = await ctx.ui.select("pruner — choose a subcommand", options);
+  return choice?.split(/\s+/)[0];
+}
+
+async function dispatchPrunerCommand(
+  args: string,
+  ctx: ExtensionCommandContext,
+  deps: CommandDependencies,
+): Promise<void> {
+  const parts = args.trim().split(/\s+/);
+  const subcommand = parts[0] || await chooseSubcommand(ctx);
+  if (!subcommand) return;
+
+  const handler = Object.hasOwn(COMMAND_HANDLERS, subcommand) ? COMMAND_HANDLERS[subcommand] : undefined;
+  if (!handler) {
+    ctx.ui.notify(`Unknown subcommand: "${subcommand}". Run /pruner help for usage.`);
+    return;
+  }
+  await handler(parts.slice(1), ctx, deps);
+}
+
+type PruneSummaryRenderer = Parameters<ExtensionAPI["registerMessageRenderer"]>[1];
+
+const renderPruneSummary: PruneSummaryRenderer = (message, { expanded }, theme) => {
+  const details = message.details as {
+    toolCallRefs?: { shortId: string; toolCallId: string }[];
+    toolCallIds?: string[];
+    turnIndex: number;
+    toolNames: string[];
+  };
+  const turnIndex = details?.turnIndex ?? "?";
+  const toolCount = normalizeSummaryToolCallRefs(details).length;
+  const header = theme.fg("accent", `[pruner] Turn ${turnIndex} summary (${toolCount} tool${toolCount === 1 ? "" : "s"})`);
+  return new Text(expanded ? header + "\n" + unwrapSummaryForDisplay(message.content) : header, 0, 0);
+};
+
 export function registerCommands(
   pi: ExtensionAPI,
   currentConfig: { value: ContextPruneConfig },
-  flushPending: (ctx: ExtensionCommandContext, options?: FlushOptions) => Promise<
-    | { ok: true; reason: "flushed" | "skipped-oversized" | "skipped-small" | "cancelled"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
-    | { ok: false; reason: string; error?: string }
-  >,
+  flushPending: FlushPending,
   capturePendingBatches: (ctx: ExtensionCommandContext) => CapturedBatch[],
   syncToolActivation: () => void,
   getStats: () => SummarizerStats,
   indexer: ToolCallIndexer,
 ): void {
-  // Register the /pruner command
+  const dependencies: CommandDependencies = {
+    currentConfig,
+    flushPending,
+    capturePendingBatches,
+    syncToolActivation,
+    getStats,
+    indexer,
+  };
   pi.registerCommand("pruner", {
     description: "Context-prune settings and commands",
-    getArgumentCompletions(prefix: string) {
-      return SUBCOMMANDS.filter((s) => s.value.startsWith(prefix));
-    },
-    async handler(args: string, ctx: ExtensionCommandContext) {
-      // Parse subcommand and remaining args from the raw argument string
-      const parts = args.trim().split(/\s+/);
-      let subcommand = parts[0] || undefined;
-      const subArgs = parts.slice(1); // e.g. ["model", "anthropic/claude-haiku-3-5"] or ["on"])
-
-      // ── Bare /pruner → interactive picker ──
-      if (!subcommand) {
-        const options = SUBCOMMANDS.map((s) => s.label);
-        const choice = await ctx.ui.select("pruner — choose a subcommand", options);
-        if (!choice) return;
-        // Extract the value (first word) from the label like "settings — interactive settings overlay"
-        subcommand = choice.split(/\s+/)[0];
-      }
-
-      switch (subcommand) {
-        // ── /pruner settings ── interactive overlay ──
-        case "settings": {
-          const config = currentConfig.value;
-          const availableModels = ctx.modelRegistry?.getAvailable() ?? [];
-
-          const thresholdValues = [...new Set([...RAW_CHAR_THRESHOLD_PRESETS, config.minRawCharsThreshold])]
-            .sort((a, b) => a - b)
-            .map(String);
-          const concurrencyValues = [...new Set([...MANUAL_PRUNE_CONCURRENCY_PRESETS, config.manualPruneConcurrency])]
-            .sort((a, b) => a - b)
-            .map(String);
-          const items: SettingItem[] = [
-            {
-              id: "enabled",
-              label: "Enabled",
-              values: ["true", "false"],
-              currentValue: String(config.enabled),
-              description: "Enable or disable context pruning",
-            },
-            {
-              id: "showPruneStatusLine",
-              label: "Prune status line",
-              values: ["true", "false"],
-              currentValue: String(config.showPruneStatusLine),
-              description: pruneStatusLineDescription(config),
-            },
-            {
-              id: "showStartupNotice",
-              label: "Startup notice",
-              values: ["true", "false"],
-              currentValue: String(config.showStartupNotice),
-              description: startupNoticeDescription(config),
-            },
-            {
-              id: "pruneOn",
-              label: "Prune trigger",
-              values: PRUNE_ON_MODES.map((m) => m.value),
-              currentValue: config.pruneOn,
-              description: pruneTriggerDescription(config.pruneOn),
-            },
-            {
-              id: "summarizerModel",
-              label: "Summarizer model",
-              values: [config.summarizerModel], // show current value as the cycling option
-              currentValue: config.summarizerModel,
-              description: "Model used for summarizing tool outputs — press Enter to browse models",
-              submenu: (currentValue: string, done: (newValue?: string) => void) => {
-                const modelItems: SettingItem[] = [
-                  {
-                    id: "default",
-                    label: "default (active model)",
-                    values: ["default"],
-                    currentValue: currentValue === "default" ? "default" : "",
-                    description: "Use the currently active model for summarization",
-                  },
-                  ...availableModels.map((m) => {
-                    const displayId = `${m.provider}/${m.id}`;
-                    return {
-                      id: displayId,
-                      label: displayId,
-                      values: [displayId],
-                      currentValue: currentValue === displayId ? displayId : "",
-                      description: m.name || displayId,
-                    };
-                  }),
-                ];
-                return new SettingsList(
-                  modelItems,
-                  15,
-                  getSettingsListTheme(),
-                  (_id: string, newValue: string) => done(newValue),
-                  () => done(undefined), // onCancel — ESC closes submenu, returns to parent
-                  { enableSearch: true },
-                );
-              },
-            },
-            {
-              id: "summarizerThinking",
-              label: "Summarizer thinking",
-              values: SUMMARIZER_THINKING_LEVELS.map((level) => level.value),
-              currentValue: config.summarizerThinking,
-              description: summarizerThinkingDescription(config.summarizerThinking),
-            },
-            {
-              id: "remindUnprunedCount",
-              label: "Remind unpruned count",
-              values: ["true", "false"],
-              currentValue: String(config.remindUnprunedCount),
-              description: remindUnprunedCountDescription(config),
-            },
-            {
-              id: "minRawCharsThreshold",
-              label: "Min raw chars",
-              values: thresholdValues,
-              currentValue: String(config.minRawCharsThreshold),
-              description: rawCharThresholdDescription(config.minRawCharsThreshold),
-            },
-            {
-              id: "batchingMode",
-              label: "Batching mode",
-              values: BATCHING_MODES.map((m) => m.value),
-              currentValue: config.batchingMode,
-              description: batchingModeDescription(config.batchingMode),
-            },
-            {
-              id: "manualPruneConcurrency",
-              label: "Manual concurrency",
-              values: concurrencyValues,
-              currentValue: String(config.manualPruneConcurrency),
-              description: manualPruneConcurrencyDescription(config.manualPruneConcurrency),
-            },
-          ];
-
-          let settingsList: SettingsList;
-          let closeSettingsOverlay = () => {};
-
-          const onChange = (id: string, newValue: string) => {
-            const newConfig = { ...currentConfig.value };
-            if (id === "enabled") {
-              newConfig.enabled = newValue === "true";
-            } else if (id === "showPruneStatusLine") {
-              newConfig.showPruneStatusLine = newValue === "true";
-              const statusLineItem = items.find((item) => item.id === "showPruneStatusLine");
-              if (statusLineItem) {
-                statusLineItem.description = pruneStatusLineDescription(newConfig);
-              }
-            } else if (id === "showStartupNotice") {
-              newConfig.showStartupNotice = newValue === "true";
-              const startupNoticeItem = items.find((item) => item.id === "showStartupNotice");
-              if (startupNoticeItem) {
-                startupNoticeItem.description = startupNoticeDescription(newConfig);
-              }
-            } else if (id === "pruneOn") {
-              newConfig.pruneOn = newValue as ContextPruneConfig["pruneOn"];
-              const pruneTriggerItem = items.find((item) => item.id === "pruneOn");
-              if (pruneTriggerItem) {
-                pruneTriggerItem.description = pruneTriggerDescription(newConfig.pruneOn);
-              }
-              const remindItem = items.find((item) => item.id === "remindUnprunedCount");
-              if (remindItem) {
-                remindItem.description = remindUnprunedCountDescription(newConfig);
-              }
-            } else if (id === "summarizerModel") {
-              newConfig.summarizerModel = newValue;
-            } else if (id === "summarizerThinking") {
-              newConfig.summarizerThinking = newValue as ContextPruneConfig["summarizerThinking"];
-              const thinkingItem = items.find((item) => item.id === "summarizerThinking");
-              if (thinkingItem) {
-                thinkingItem.description = summarizerThinkingDescription(newConfig.summarizerThinking);
-              }
-            } else if (id === "remindUnprunedCount") {
-              newConfig.remindUnprunedCount = newValue === "true";
-              const remindItem = items.find((item) => item.id === "remindUnprunedCount");
-              if (remindItem) {
-                remindItem.description = remindUnprunedCountDescription(newConfig);
-              }
-              const pruneTriggerItem = items.find((item) => item.id === "pruneOn");
-              if (pruneTriggerItem) {
-                pruneTriggerItem.description = pruneTriggerDescription(newConfig.pruneOn);
-              }
-            } else if (id === "minRawCharsThreshold") {
-              const threshold = parseMinRawCharsThreshold(newValue);
-              if (threshold === null) return;
-              newConfig.minRawCharsThreshold = threshold;
-              const thresholdItem = items.find((item) => item.id === "minRawCharsThreshold");
-              if (thresholdItem) thresholdItem.description = rawCharThresholdDescription(threshold);
-            } else if (id === "batchingMode") {
-              newConfig.batchingMode = newValue as ContextPruneConfig["batchingMode"];
-              const batchingItem = items.find((item) => item.id === "batchingMode");
-              if (batchingItem) {
-                batchingItem.description = batchingModeDescription(newConfig.batchingMode);
-              }
-            } else if (id === "manualPruneConcurrency") {
-              const concurrency = parseManualPruneConcurrency(newValue);
-              if (concurrency === null) return;
-              newConfig.manualPruneConcurrency = concurrency;
-              const concurrencyItem = items.find((item) => item.id === "manualPruneConcurrency");
-              if (concurrencyItem) concurrencyItem.description = manualPruneConcurrencyDescription(concurrency);
-            }
-            currentConfig.value = newConfig;
-            saveConfig(newConfig);
-            setPruneStatusWidget(ctx, newConfig, getStats());
-            settingsList?.invalidate();
-            // Toggle context_prune tool activation when config changes
-            syncToolActivation();
-          };
-
-          settingsList = new SettingsList(
-            items,
-            10,
-            getSettingsListTheme(),
-            onChange,
-            () => closeSettingsOverlay(), // onCancel — close the custom overlay
-            { enableSearch: false },
-          );
-
-          // Use ctx.ui.custom() to show the settings list as an overlay.
-          // The factory receives (tui, theme, keybindings, done) and returns a Component.
-          // Wire Escape through the SettingsList constructor's onCancel callback instead
-          // of mutating private SettingsList fields.
-          await ctx.ui.custom(
-            (_tui, _theme, _keybindings, done) => {
-              closeSettingsOverlay = () => done(undefined);
-              return new SettingsOverlay("pruner settings", settingsList);
-            },
-            {
-              overlay: true,
-              overlayOptions: { width: 60 },
-            },
-          );
-          break;
-        }
-
-        // ── /pruner on ──
-        case "on": {
-          currentConfig.value = { ...currentConfig.value, enabled: true };
-          saveConfig(currentConfig.value);
-          ctx.ui.notify("Context pruning enabled.");
-          setPruneStatusWidget(ctx, currentConfig.value, getStats());
-          syncToolActivation();
-          break;
-        }
-
-        // ── /pruner off ──
-        case "off": {
-          currentConfig.value = { ...currentConfig.value, enabled: false };
-          saveConfig(currentConfig.value);
-          ctx.ui.notify("Context pruning disabled.");
-          setPruneStatusWidget(ctx, currentConfig.value, getStats());
-          syncToolActivation();
-          break;
-        }
-
-        // ── /pruner status ──
-        case "status": {
-          const cfg = currentConfig.value;
-          const mode = PRUNE_ON_MODES.find((m) => m.value === cfg.pruneOn)?.label ?? cfg.pruneOn;
-          const s = getStats();
-          const statsLine = s.callCount > 0
-            ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
-            : "\n  (no summarizer calls yet)";
-          ctx.ui.notify(
-            `pruner status:\n  enabled:  ${cfg.enabled}\n  model:    ${cfg.summarizerModel}\n  thinking: ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:  ${mode}\n  batching: ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min chars: ${cfg.minRawCharsThreshold.toLocaleString()} (${cfg.minRawCharsThreshold === 0 ? "off" : "skip at or below"})\n  concurrency: ${cfg.manualPruneConcurrency} (/pruner now)\n  status:   ${cfg.showPruneStatusLine ? "on" : "off"}\n  startup:  ${cfg.showStartupNotice ? "on" : "off"}\n  remind:   ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
-          );
-          break;
-        }
-
-        // ── /pruner tree ── foldable tree browser ──
-        case "tree": {
-          const roots = buildPruneTree(ctx, indexer);
-          if (roots.length === 0) {
-            ctx.ui.notify("No pruned tool calls found in this session.", "info");
-            break;
-          }
-
-          await ctx.ui.custom(
-            (_tui, theme, _keybindings, done) => {
-              const browser = new TreeBrowser(roots, theme, () => done(undefined));
-              return browser;
-            },
-            {
-              overlay: true,
-              overlayOptions: { width: "80%", maxHeight: "70%", anchor: "center" },
-            },
-          );
-          break;
-        }
-
-        // ── /pruner stats ──
-        case "stats": {
-          const s = getStats();
-          if (s.callCount === 0 && s.retryCount === 0 && s.finalFailureCount === 0) {
-            ctx.ui.notify("pruner stats: no summarizer calls yet.");
-          } else {
-            ctx.ui.notify(
-              `pruner stats:\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}\n  retries:     ${s.retryCount}\n  failed:      ${s.finalFailureCount}\n  failures:    rate-limit ${s.failureCounts["rate-limit"]}, network ${s.failureCounts.network}, provider ${s.failureCounts.provider}, persistence ${s.failureCounts.persistence}, cancelled ${s.failureCounts.cancelled}${formatTheoreticalSavings(s, ctx.model) ? `\n  saved:       ${formatTheoreticalSavings(s, ctx.model)}` : ""}`,
-            );
-          }
-          break;
-        }
-
-        // ── /pruner model [value] ──
-        case "model": {
-          const modelArg = subArgs[0];
-          if (!modelArg) {
-            ctx.ui.notify(
-              `Current summarizer model: ${currentConfig.value.summarizerModel}\nCurrent summarizer thinking: ${summarizerThinkingLabel(currentConfig.value.summarizerThinking)} (${currentConfig.value.summarizerThinking})`,
-            );
-          } else {
-            const parsed = parseModelAndThinkingArg(modelArg);
-            if (parsed.error) {
-              ctx.ui.notify(parsed.error, "warning");
-              return;
-            }
-            currentConfig.value = {
-              ...currentConfig.value,
-              summarizerModel: parsed.model,
-              summarizerThinking: parsed.thinking ?? currentConfig.value.summarizerThinking,
-            };
-            saveConfig(currentConfig.value);
-            const thinkingText = parsed.thinking ? ` with thinking ${parsed.thinking}` : "";
-            ctx.ui.notify(`Summarizer model set to: ${parsed.model}${thinkingText}`);
-          }
-          break;
-        }
-
-        // ── /pruner thinking [value] ──
-        case "thinking": {
-          const thinkingArg = subArgs[0];
-          if (!thinkingArg) {
-            ctx.ui.notify(
-              `Current summarizer thinking: ${summarizerThinkingLabel(currentConfig.value.summarizerThinking)} (${currentConfig.value.summarizerThinking})`,
-            );
-            return;
-          }
-          if (SUMMARIZER_THINKING_LEVELS.some((level) => level.value === thinkingArg)) {
-            currentConfig.value = {
-              ...currentConfig.value,
-              summarizerThinking: thinkingArg as ContextPruneConfig["summarizerThinking"],
-            };
-          } else {
-            ctx.ui.notify(
-              `Invalid summarizer thinking level: ${thinkingArg}. Use one of: ${SUMMARIZER_THINKING_LEVELS.map((level) => level.value).join(", ")}.`,
-              "warning",
-            );
-            return;
-          }
-          saveConfig(currentConfig.value);
-          ctx.ui.notify(`Summarizer thinking set to: ${currentConfig.value.summarizerThinking}`);
-          break;
-        }
-
-        // ── /pruner prune-on [value] ──
-        case "prune-on": {
-          const modeArg = subArgs[0];
-          if (!modeArg) {
-            const options = PRUNE_ON_MODES.map((m) => `${m.value} — ${m.label}`);
-            const choice = await ctx.ui.select("pruner — choose when to trigger summarization", options);
-            if (!choice) return;
-            // Extract the value (first word) from "every-turn — Every turn"
-            const chosenValue = choice.split(/\s+/)[0] as ContextPruneConfig["pruneOn"];
-            currentConfig.value = { ...currentConfig.value, pruneOn: chosenValue };
-          } else {
-            currentConfig.value = { ...currentConfig.value, pruneOn: modeArg as ContextPruneConfig["pruneOn"] };
-          }
-          saveConfig(currentConfig.value);
-          setPruneStatusWidget(ctx, currentConfig.value, getStats());
-          syncToolActivation();
-          break;
-        }
-
-        // ── /pruner batching [value] ──
-        case "batching": {
-          const batchArg = subArgs[0];
-          if (!batchArg) {
-            const options = BATCHING_MODES.map((m) => `${m.value} — ${m.label}`);
-            const choice = await ctx.ui.select("pruner — choose batching granularity", options);
-            if (!choice) return;
-            const chosenValue = choice.split(/\s+/)[0] as ContextPruneConfig["batchingMode"];
-            currentConfig.value = { ...currentConfig.value, batchingMode: chosenValue };
-          } else {
-            if (!BATCHING_MODES.some((m) => m.value === batchArg)) {
-              ctx.ui.notify(
-                `Invalid batching mode: ${batchArg}. Use one of: ${BATCHING_MODES.map((m) => m.value).join(", ")}.`,
-                "warning",
-              );
-              return;
-            }
-            currentConfig.value = { ...currentConfig.value, batchingMode: batchArg as ContextPruneConfig["batchingMode"] };
-          }
-          saveConfig(currentConfig.value);
-          ctx.ui.notify(`Batching mode set to: ${batchingModeLabel(currentConfig.value.batchingMode)}`);
-          break;
-        }
-
-        // ── /pruner manual-concurrency [n] ──
-        case "manual-concurrency": {
-          const concurrencyArg = subArgs[0];
-          if (!concurrencyArg) {
-            ctx.ui.notify(
-              `Manual prune concurrency: ${currentConfig.value.manualPruneConcurrency}\n${manualPruneConcurrencyDescription(currentConfig.value.manualPruneConcurrency)}`,
-              "info",
-            );
-            break;
-          }
-          const concurrency = parseManualPruneConcurrency(concurrencyArg);
-          if (concurrency === null) {
-            ctx.ui.notify(`Invalid concurrency: ${concurrencyArg}. Use an integer from ${MANUAL_PRUNE_CONCURRENCY_MIN} to ${MANUAL_PRUNE_CONCURRENCY_MAX}.`, "error");
-            break;
-          }
-          currentConfig.value = { ...currentConfig.value, manualPruneConcurrency: concurrency };
-          saveConfig(currentConfig.value);
-          ctx.ui.notify(`Manual prune concurrency set to: ${concurrency}`);
-          break;
-        }
-
-        // ── /pruner min-raw-chars [n] ──
-        case "min-raw-chars": {
-          const thresholdArg = subArgs[0];
-          if (!thresholdArg) {
-            ctx.ui.notify(
-              `Min raw chars threshold: ${currentConfig.value.minRawCharsThreshold.toLocaleString()}\n${rawCharThresholdDescription(currentConfig.value.minRawCharsThreshold)}`,
-              "info",
-            );
-            break;
-          }
-          const threshold = parseMinRawCharsThreshold(thresholdArg);
-          if (threshold === null) {
-            ctx.ui.notify("Invalid min raw chars threshold. Use a non-negative integer; 0 disables skipping.", "warning");
-            break;
-          }
-          currentConfig.value = { ...currentConfig.value, minRawCharsThreshold: threshold };
-          saveConfig(currentConfig.value);
-          ctx.ui.notify(`Min raw chars threshold set to: ${threshold.toLocaleString()}\n${rawCharThresholdDescription(threshold)}`);
-          break;
-        }
-        // ── /pruner dry-run ──
-        case "dry-run": {
-          const preview = calculateDryRunPreview(
-            capturePendingBatches(ctx),
-            currentConfig.value.minRawCharsThreshold,
-            getStats(),
-          );
-          if (preview.batchCount === 0) {
-            ctx.ui.notify("pruner dry-run: nothing pending — no batches to summarize", "info");
-            break;
-          }
-          const estimate = preview.estimatedSavingsCharCount === undefined
-            ? "  estimate:    unavailable (no accepted summary history)"
-            : `  estimate:    ~${preview.estimatedSavingsCharCount.toLocaleString()} chars saved; ~${preview.estimatedSummaryCharCount!.toLocaleString()} summary chars`;
-          ctx.ui.notify(
-            `pruner dry-run (no changes made):\n  pending:     ${preview.batchCount} batches, ${preview.toolCallCount} tool calls, ${preview.rawCharCount.toLocaleString()} raw chars\n  candidates:  ${preview.candidateBatchCount} batches, ${preview.candidateToolCallCount} tool calls, ${preview.candidateRawCharCount.toLocaleString()} raw chars\n  threshold:   ${preview.skippedBatchCount} skipped, ${preview.skippedRawCharCount.toLocaleString()} raw chars${preview.skippedBatchCount === 0 ? "" : ` (at or below ${currentConfig.value.minRawCharsThreshold.toLocaleString()})`}\n${estimate}`,
-            "info",
-          );
-          break;
-        }
-
-        // ── /pruner now ──
-        // ── /pruner now ──
-        case "now": {
-          if (!currentConfig.value.enabled) {
-            ctx.ui.notify("Context pruning is disabled. Run /pruner on first.", "warning");
-            return;
-          }
-
-          // Capture the pending queue first so the centered overlay can pre-build its rows.
-          const batches = capturePendingBatches(ctx);
-          if (batches.length === 0) {
-            ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
-            break;
-          }
-
-          // A centered overlay owns focus for the duration of manual pruning.
-          // It displays up to sixteen rows and uses Esc for a soft stop.
-          const lifecycle = createManualPruneOverlayLifecycle();
-          let progressOverlay: PruneProgressOverlay | undefined;
-          const progressOverlayPromise = ctx.hasUI
-            ? ctx.ui.custom<void>(
-                (tui, theme, keybindings, done) => {
-                  lifecycle.setClose(() => done(undefined));
-                  progressOverlay = new PruneProgressOverlay(
-                    tui,
-                    theme,
-                    batches,
-                    () => lifecycle.cancel(),
-
-                    (data) => keybindings.matches(data, "tui.select.cancel"),
-                  );
-                  return progressOverlay;
-                },
-                {
-                  overlay: true,
-                  overlayOptions: { width: 80, maxHeight: "80%", anchor: "center" },
-                  onHandle: (handle) => handle.focus(),
-                },
-              )
-            : undefined;
-          const updateRow = (index: number, status: RowStatus, chars?: number, detail?: ManualPruneProgressDetail) =>
-            progressOverlay?.updateRow(index, status, chars, detail);
-
-          const result = await flushPending(ctx, {
-            previewedBatches: batches,
-            signal: lifecycle.signal,
-            onProgress: (index, _total, _batch, stage, detail) => {
-              if (stage === "start") updateRow(index, "running", 0, detail);
-              else if (stage === "retry") updateRow(index, "retrying", undefined, detail);
-              else if (stage === "done") updateRow(index, "done", undefined, detail);
-              else if (stage === "failed") updateRow(index, "failed", undefined, detail);
-              else updateRow(index, "skipped", undefined, detail);
-            },
-            onBatchTextProgress: (index, _total, _batch, receivedChars) => {
-              updateRow(index, "running", receivedChars);
-            },
-          });
-
-          lifecycle.close();
-          await progressOverlayPromise;
-          setPruneStatusWidget(ctx, currentConfig.value, getStats());
-
-          if (!result.ok) {
-            const suffix = "error" in result && result.error ? ` (${result.error})` : "";
-            const message = lifecycle.signal.aborted || result.reason === "cancelled"
-              ? "pruner: cancelled before any batch completed; all work remains pending"
-              : `pruner: nothing flushed — ${result.reason}${suffix}`;
-            ctx.ui.notify(message, result.reason === "empty" ? "info" : "warning");
-            break;
-          }
-          if (result.reason === "cancelled") {
-            const remaining = Math.max(0, batches.length - result.batchCount);
-            ctx.ui.notify(`pruner: cancellation complete — retained ${result.batchCount} completed batch(es); ${remaining} remain pending`, "info");
-            break;
-          }
-
-          if (result.reason === "skipped-oversized") {
-            if (currentConfig.value.notifySkipped) {
-              ctx.ui.notify(
-                `pruner: skipped pruning ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} — summary was ${result.summaryCharCount} chars vs ${result.rawCharCount} raw chars; frontier advanced past this range`,
-                "warning"
-              );
-            }
-            break;
-          }
-
-          ctx.ui.notify(
-            `pruner: pruned ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} from ${result.batchCount} batch${result.batchCount === 1 ? "" : "es"} — summary ${result.summaryCharCount} chars vs ${result.rawCharCount} raw chars`,
-            "info"
-          );
-          break;
-        }
-
-        // ── /pruner help ──
-        case "help":
-          ctx.ui.notify(HELP_TEXT);
-          break;
-
-        // ── Unknown subcommand ──
-        default:
-          ctx.ui.notify(
-            `Unknown subcommand: "${subcommand}". Run /pruner help for usage.`,
-          );
-      }
-    },
+    getArgumentCompletions: (prefix: string) => SUBCOMMANDS.filter((subcommand) => subcommand.value.startsWith(prefix)),
+    handler: (args: string, ctx: ExtensionCommandContext) => dispatchPrunerCommand(args, ctx, dependencies),
   });
-
-  // Register custom renderer for context-prune-summary messages
-  pi.registerMessageRenderer("context-prune-summary", (message, { expanded }, theme) => {
-    const details = message.details as {
-      toolCallRefs?: { shortId: string; toolCallId: string }[];
-      toolCallIds?: string[];
-      turnIndex: number;
-      toolNames: string[];
-    };
-    const turnIndex = details?.turnIndex ?? "?";
-    const toolCount = normalizeSummaryToolCallRefs(details).length;
-    const header = theme.fg("accent", `[pruner] Turn ${turnIndex} summary (${toolCount} tool${toolCount === 1 ? "" : "s"})`);
-    if (expanded) {
-      return new Text(header + "\n" + unwrapSummaryForDisplay(message.content), 0, 0);
-    }
-    return new Text(header, 0, 0);
-  });
+  pi.registerMessageRenderer("context-prune-summary", renderPruneSummary);
 }

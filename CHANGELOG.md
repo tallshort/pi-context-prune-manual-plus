@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Refactored `/pruner` command dispatch into focused handlers and table-driven routing while preserving existing commands, notifications, settings, and progress behavior.
+- Split flush provider execution and settlement into dedicated modules, binding each batch to its result and raw-character metrics while preserving retry, cancellation, persistence, recovery, usage-accounting, and frontier semantics.
+
+### Fixed
+
+- Preserved the existing `registerCommands` callback type compatibility after the internal flush refactor.
+
 ## [1.7.0]
 
 ### Added

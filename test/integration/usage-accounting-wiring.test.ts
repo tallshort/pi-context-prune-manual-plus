@@ -73,11 +73,21 @@ type FinalResponse = ReturnType<typeof response>;
 function setup(
   responses: FinalResponse | FinalResponse[],
   appendUsage: ReturnType<typeof vi.fn>,
-  options: { sendMessage?: () => void } = {},
+  options: { sendMessage?: () => void; resultGate?: Promise<void> } = {},
 ) {
   const entries: Array<{ customType: string; data: any }> = [];
   const responseQueue = Array.isArray(responses) ? [...responses] : [responses];
   const fallbackResponse = responseQueue[responseQueue.length - 1];
+  const stream = vi.fn(() => {
+    const finalResponse = responseQueue.shift() ?? fallbackResponse;
+    return {
+      async *[Symbol.asyncIterator]() {},
+      result: async () => {
+        await options.resultGate;
+        return finalResponse;
+      },
+    };
+  });
   const pi = {
     on: vi.fn(),
     appendEntry: vi.fn((customType: string, data: any) => {
@@ -94,15 +104,7 @@ function setup(
     model: { provider: "provider", id: "requested-model" },
     modelRegistry: {
       getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "key" })),
-      getProvider: vi.fn(() => ({
-        stream: () => {
-          const finalResponse = responseQueue.shift() ?? fallbackResponse;
-          return {
-            async *[Symbol.asyncIterator]() {},
-            result: async () => finalResponse,
-          };
-        },
-      })),
+      getProvider: vi.fn(() => ({ stream })),
     },
     sessionManager: {
       getSessionId: () => "session-1",
@@ -111,9 +113,8 @@ function setup(
     ui: { notify: vi.fn(), setStatus: vi.fn() },
   } as any;
 
-  return { ctx, entries };
+  return { ctx, entries, stream };
 }
-
 function latestStats(entries: Array<{ customType: string; data: any }>) {
   return entries.filter((entry) => entry.customType === CUSTOM_TYPE_STATS).at(-1)?.data;
 }
@@ -286,6 +287,40 @@ describe("flush usage accounting", () => {
     expect(result).toMatchObject({ ok: false, reason: "summarizer-failed" });
     expect(appendUsage).toHaveBeenCalledTimes(1);
     expect(latestStats(entries)).toMatchObject({ callCount: 1, totalCost: 0.1 });
+  });
+
+  it("rejects a concurrent flush without starting a second provider call", async () => {
+    let release!: () => void;
+    const resultGate = new Promise<void>((resolve) => { release = resolve; });
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, stream } = setup(response("short summary"), appendUsage, { resultGate });
+
+    const first = harness.flush!(ctx, { previewedBatches: [batch(5_000)] });
+    await vi.waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    const second = await harness.flush!(ctx, { previewedBatches: [batch(5_000, "call-2", 8)] });
+
+    expect(second).toEqual({ ok: false, reason: "already-flushing" });
+    expect(stream).toHaveBeenCalledTimes(1);
+    release();
+    await expect(first).resolves.toMatchObject({ ok: true, reason: "flushed" });
+  });
+
+  it("does not drain work or call the provider when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const appendUsage = vi.fn();
+    const { ctx, stream } = setup(response("short summary"), appendUsage);
+    const pending = batch(5_000);
+
+    const aborted = await harness.flush!(ctx, {
+      previewedBatches: [pending],
+      signal: controller.signal,
+    });
+    const retried = await harness.flush!(ctx, { previewedBatches: [pending] });
+
+    expect(aborted).toEqual({ ok: false, reason: "aborted" });
+    expect(retried).toMatchObject({ ok: true, reason: "flushed" });
+    expect(stream).toHaveBeenCalledTimes(1);
   });
 
   it("retains usage from an already-started batch after soft cancellation", async () => {

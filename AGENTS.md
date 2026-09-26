@@ -31,7 +31,7 @@ This repository is a Pi coding-agent extension that prunes tool-call trees befor
 ## Code map
 - `index.ts` wires capture, flushing, indexing, session persistence, and Pi events.
 - `src/types.ts` defines shared domain/config types; `src/config.ts` persists extension settings.
-- `src/batch-capture.ts`, `src/summarizer.ts`, `src/indexer.ts`, and `src/pruner.ts` implement the core pruning pipeline.
+- `src/batch-capture.ts`, `src/summarizer.ts`, `src/indexer.ts`, and `src/pruner.ts` implement the core pruning pipeline; `src/flush-batch-executor.ts` runs provider work and `src/flush-settler.ts` commits results, restores unfinished work, and advances the frontier.
 - `src/commands.ts` owns `/pruner` commands and TUI components; `src/manual-prune-scheduler.ts` contains the testable bounded manual scheduler.
 - `src/context-prune-tool.ts`, `src/query-tool.ts`, `src/reminder.ts`, `src/stats.ts`, and `src/tree-browser.ts` provide supporting Pi features; `src/usage-report.ts` and `src/usage-log.ts` bridge summarizer accounting to Pi and pi-stats.
 - `test/` contains Vitest unit tests.
