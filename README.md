@@ -372,6 +372,7 @@ session_start
   └─► indexer.reconstruct()     rebuild Map from session branch entries
   └─► statsAccum.reconstruct()  rebuild stats from session branch entries
   └─► frontier.reconstruct()    rebuild last prune-attempt boundary from session entries
+  └─► refresh pending footer from the current branch projection
   └─► syncToolActivation()      activate/deactivate context_prune tool
 
 session_tree
@@ -379,7 +380,7 @@ session_tree
   └─► statsAccum.reconstruct()  rebuild stats (branch may have different history)
   └─► frontier.reconstruct()    rebuild last prune-attempt boundary for the branch
   └─► clear pendingBatches      discard queued batches from old branch
-  └─► refresh on-demand pending footer from the current branch projection
+  └─► refresh pending footer from the current branch projection
 
 before_agent_start (fallback when it precedes session_start)
   └─► loadConfig() + syncToolActivation()  initialize agentic-auto prompt/tool state
@@ -389,7 +390,7 @@ context (fallback when it precedes session_start)
   └─► hydrate persisted index/stats/frontier before filtering provider-visible messages
 
 session_compact
-  └─► refresh on-demand pending footer from the retained provider-visible tail
+  └─► discard old queued batches; refresh footer from the retained provider-visible tail
 
 turn_end (tool calls present + enabled)
   └─► resolve the persisted assistant's session-relative turn index (Pi's event index restarts each agent run)
@@ -398,7 +399,7 @@ turn_end (tool calls present + enabled)
   └─► drop context_prune housekeeping results
   └─► push remaining tool calls to pendingBatches
   └─► if every-turn: flushPending() immediately (session delivery)
-  └─► otherwise: notify user of pending count + trigger
+  └─► otherwise: refresh pending footer from the current branch projection
 
 tool_execution_end (context_checkpoint / legacy context_tag, on-context-tag mode)
   └─► flushPending()            runtime delivery
@@ -407,7 +408,7 @@ message_end (final text-only assistant message, agent-message mode)
   └─► flushPending()            session delivery
 
 agent_end
-  └─► refresh on-demand pending count; in other modes update footer if batches remain pending
+  └─► refresh pending footer from the current branch projection (clear stale counts)
 
 context_prune tool call (agentic-auto mode)
   └─► flushPending()            runtime delivery
@@ -447,6 +448,7 @@ The extension registers a status widget in the Pi footer that shows the current 
 - `prune: ON (On agent message)` — pruning active with the current trigger mode
 - `prune: ON (Every turn) | ↑1.2k ↓340 $0.003` — pruning active with cumulative stats (input/output tokens, cost)
 - `prune: ON (On demand, 3 pending)` — three currently eligible batches in the provider-visible session tail, updated after tool-call turns and compaction (it does not count all historical results)
+- `prune: 3 pending` — in non-on-demand modes, three eligible batches await the configured trigger; the count refreshes from the current session projection after branch navigation and compaction
 - `prune: summarizing…` — currently running the summarizer LLM call
 - Live progress details are shown in richer surfaces instead: `/pruner now` uses a focusable centered overlay (up to 16 rows), and agentic-auto `context_prune` streams updates in the tool output box above the input
 - When `showPruneStatusLine` is `false`, the footer stays clear and the queued-turn notice is suppressed, but pruning still works normally.

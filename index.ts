@@ -219,6 +219,16 @@ export default function (pi: ExtensionAPI) {
     return groupBatchesByMode(batches, currentConfig.value.batchingMode);
   };
 
+  const refreshPendingStatus = (ctx: any) => {
+    const config = currentConfig.value;
+    const stats = statsAccum.getStats();
+    const pendingCount = config.enabled && config.showPruneStatusLine ? capturePendingBatches(ctx).length : 0;
+    const text = config.pruneOn === "on-demand" || pendingCount === 0
+      ? pruneStatusText(config, stats, pendingCount)
+      : `prune: ${pendingCount} pending`;
+    setPruneStatusWidget(ctx, config, text);
+  };
+
   // Summarizes + indexes all pending batches.
   // Summarizes + indexes all pending batches. `/pruner now` uses bounded
   // concurrency so callers can update per-row UI; other paths summarize in parallel.
@@ -336,8 +346,8 @@ export default function (pi: ExtensionAPI) {
     pendingBatches.length = 0;
     deferredSummaries.clear();
 
-    // Update footer status
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
+    // Hydration is complete: include pending batches already present on reload.
+    refreshPendingStatus(ctx);
 
     // Toggle context_prune tool activation for agentic-auto mode
     syncToolActivation();
@@ -356,16 +366,14 @@ export default function (pi: ExtensionAPI) {
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
     deferredSummaries.clear();
-    if (currentConfig.value.pruneOn === "on-demand") {
-      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length));
-    }
+    refreshPendingStatus(ctx);
   });
 
   // Compaction changes the provider-visible tail without a turn_end.
   pi.on("session_compact", async (_event, ctx) => {
-    if (currentConfig.value.pruneOn === "on-demand") {
-      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length));
-    }
+    // Old queued batches may no longer be visible after compaction.
+    pendingBatches.length = 0;
+    refreshPendingStatus(ctx);
   });
 
   // ── turn_end: capture batch, flush immediately or queue ──────────────────
@@ -402,9 +410,7 @@ export default function (pi: ExtensionAPI) {
       toolCalls: capturedBatch.toolCalls.filter((tc) => tc.toolName !== CONTEXT_PRUNE_TOOL_NAME),
     });
     if (!batch) {
-      if (currentConfig.value.pruneOn === "on-demand" && currentConfig.value.showPruneStatusLine) {
-        setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length));
-      }
+      refreshPendingStatus(ctx);
       return;
     }
 
@@ -413,13 +419,7 @@ export default function (pi: ExtensionAPI) {
     if (currentConfig.value.pruneOn === "every-turn") {
       await flushPending(ctx, { delivery: "session" });
     } else {
-      const n = pendingBatches.length;
-      if (currentConfig.value.showPruneStatusLine) {
-        const statusText = currentConfig.value.pruneOn === "on-demand"
-          ? pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length)
-          : `prune: ${n} pending`;
-        setPruneStatusWidget(ctx, currentConfig.value, statusText);
-      }
+      refreshPendingStatus(ctx);
     }
   });
 
@@ -448,13 +448,7 @@ export default function (pi: ExtensionAPI) {
   // already be disposing the session, so avoid starting a best-effort LLM call here.
   pi.on("agent_end", async (_event, ctx) => {
     if (!currentConfig.value.enabled) return;
-    if (currentConfig.value.pruneOn === "on-demand") {
-      const pendingCount = capturePendingBatches(ctx).length;
-      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), pendingCount));
-      return;
-    }
-    if (pendingBatches.length === 0) return;
-    setPruneStatusWidget(ctx, currentConfig.value, `prune: ${pendingBatches.length} pending`);
+    refreshPendingStatus(ctx);
   });
 
   // ── context: prune summarized tool results from next LLM call ─────────────

@@ -32,6 +32,80 @@ function harness() {
 }
 
 describe("on-demand pending status across agent runs", () => {
+  it("shows existing pending batches immediately when a session is reopened", async () => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-demand", showPruneStatusLine: true });
+    const { handlers, statuses, ctx } = harness();
+    await handlers.get("session_start")!({}, ctx);
+    expect(statuses.at(-1)).toContain("1 pending");
+  });
+
+  it("refreshes the footer after navigating to a branch without pending batches", async () => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-demand", showPruneStatusLine: true });
+    const { handlers, statuses, ctx, setVisibleIds } = harness();
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("agent_end")!({}, ctx);
+    expect(statuses.at(-1)).toContain("1 pending");
+    setVisibleIds(["assistant-old", "result-old"]);
+    await handlers.get("session_tree")!({}, ctx);
+    expect(statuses.at(-1)).not.toContain("pending");
+  });
+
+  it("never displays pending on a disabled pruner after branch navigation or compaction", async () => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: false, pruneOn: "on-demand", showPruneStatusLine: true });
+    const { handlers, statuses, ctx } = harness();
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("session_tree")!({}, ctx);
+    expect(statuses.at(-1)).toBe("prune: OFF (On demand)");
+    await handlers.get("session_compact")!({}, ctx);
+    expect(statuses.at(-1)).toBe("prune: OFF (On demand)");
+  });
+  it.each(["on-context-tag", "agent-message"] as const)("refreshes %s after branch navigation and does not restore a stale count at agent_end", async (pruneOn) => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn, showPruneStatusLine: true });
+    const { handlers, statuses, entries, ctx, setVisibleIds } = harness();
+    await handlers.get("session_start")!({}, ctx);
+    const [assistant, result] = toolTurn("new");
+    entries.push(assistant, result);
+    await handlers.get("turn_end")!({ message: assistant.message, toolResults: [result.message], turnIndex: 0 }, ctx);
+    expect(statuses.at(-1)).toBe("prune: 2 pending");
+
+    setVisibleIds(["assistant-old", "result-old"]);
+    await handlers.get("session_tree")!({}, ctx);
+    expect(statuses.at(-1)).not.toContain("pending");
+    await handlers.get("agent_end")!({}, ctx);
+    expect(statuses.at(-1)).not.toContain("pending");
+  });
+
+  it("refreshes non-on-demand footer after compaction and later tool turns", async () => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-context-tag", showPruneStatusLine: true });
+    const { handlers, statuses, entries, ctx, setVisibleIds } = harness();
+    await handlers.get("session_start")!({}, ctx);
+    const [assistant, result] = toolTurn("new");
+    entries.push(assistant, result);
+    await handlers.get("turn_end")!({ message: assistant.message, toolResults: [result.message], turnIndex: 0 }, ctx);
+    expect(statuses.at(-1)).toBe("prune: 2 pending");
+
+    setVisibleIds(["assistant-old", "result-old"]);
+    await handlers.get("session_compact")!({}, ctx);
+    expect(statuses.at(-1)).not.toContain("pending");
+    await handlers.get("agent_end")!({}, ctx);
+    expect(statuses.at(-1)).not.toContain("pending");
+
+    const [nextAssistant, nextResult] = toolTurn("after-compaction");
+    entries.push(nextAssistant, nextResult);
+    setVisibleIds(["assistant-old", "result-old", "assistant-after-compaction", "result-after-compaction"]);
+    await handlers.get("turn_end")!({ message: nextAssistant.message, toolResults: [nextResult.message], turnIndex: 1 }, ctx);
+    expect(statuses.at(-1)).toBe("prune: 1 pending");
+  });
+
+  it("does not show pending on a disabled non-on-demand footer", async () => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: false, pruneOn: "on-context-tag", showPruneStatusLine: true });
+    const { handlers, statuses, ctx } = harness();
+    await handlers.get("session_start")!({}, ctx);
+    await handlers.get("session_tree")!({}, ctx);
+    await handlers.get("session_compact")!({}, ctx);
+    expect(statuses.at(-1)).toBe("prune: OFF (On context tag)");
+  });
+
   it("queues the current turn after an older frontier even outside on-demand mode", async () => {
     loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-context-tag", showPruneStatusLine: true });
     const { handlers, statuses, entries, ctx } = harness();
@@ -39,7 +113,7 @@ describe("on-demand pending status across agent runs", () => {
     const [assistant, result] = toolTurn("new");
     entries.push(assistant, result);
     await handlers.get("turn_end")!({ message: assistant.message, toolResults: [result.message], turnIndex: 0 }, ctx);
-    expect(statuses.at(-1)).toBe("prune: 1 pending");
+    expect(statuses.at(-1)).toBe("prune: 2 pending");
   });
   it("refreshes from session-relative pending batches when Pi's turnIndex restarts at zero", async () => {
     loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-demand", showPruneStatusLine: true });
