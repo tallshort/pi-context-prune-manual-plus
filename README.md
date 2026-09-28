@@ -379,6 +379,7 @@ session_tree
   └─► statsAccum.reconstruct()  rebuild stats (branch may have different history)
   └─► frontier.reconstruct()    rebuild last prune-attempt boundary for the branch
   └─► clear pendingBatches      discard queued batches from old branch
+  └─► refresh on-demand pending footer from the current branch projection
 
 before_agent_start (fallback when it precedes session_start)
   └─► loadConfig() + syncToolActivation()  initialize agentic-auto prompt/tool state
@@ -386,7 +387,12 @@ before_agent_start (fallback when it precedes session_start)
 context (fallback when it precedes session_start)
   └─► loadConfig() + syncToolActivation()  initialize persisted settings before filtering
   └─► hydrate persisted index/stats/frontier before filtering provider-visible messages
+
+session_compact
+  └─► refresh on-demand pending footer from the retained provider-visible tail
+
 turn_end (tool calls present + enabled)
+  └─► resolve the persisted assistant's session-relative turn index (Pi's event index restarts each agent run)
   └─► captureBatch()            serialize the just-finished tool call batch
   └─► trim against index/frontier so same-turn later tool calls survive an earlier mid-turn prune
   └─► drop context_prune housekeeping results
@@ -401,7 +407,7 @@ message_end (final text-only assistant message, agent-message mode)
   └─► flushPending()            session delivery
 
 agent_end
-  └─► update footer status only if batches remain pending
+  └─► refresh on-demand pending count; in other modes update footer if batches remain pending
 
 context_prune tool call (agentic-auto mode)
   └─► flushPending()            runtime delivery
@@ -440,7 +446,7 @@ The extension registers a status widget in the Pi footer that shows the current 
 - `prune: OFF (On agent message)` — pruning disabled, showing what mode it would use
 - `prune: ON (On agent message)` — pruning active with the current trigger mode
 - `prune: ON (Every turn) | ↑1.2k ↓340 $0.003` — pruning active with cumulative stats (input/output tokens, cost)
-- `prune: 3 pending` — batches queued, waiting for the trigger
+- `prune: ON (On demand, 3 pending)` — three currently eligible batches in the provider-visible session tail, updated after tool-call turns and compaction (it does not count all historical results)
 - `prune: summarizing…` — currently running the summarizer LLM call
 - Live progress details are shown in richer surfaces instead: `/pruner now` uses a focusable centered overlay (up to 16 rows), and agentic-auto `context_prune` streams updates in the tool output box above the input
 - When `showPruneStatusLine` is `false`, the footer stays clear and the queued-turn notice is suppressed, but pruning still works normally.

@@ -356,6 +356,16 @@ export default function (pi: ExtensionAPI) {
     // Pending batches belong to the old branch — discard them
     pendingBatches.length = 0;
     deferredSummaries.clear();
+    if (currentConfig.value.pruneOn === "on-demand") {
+      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length));
+    }
+  });
+
+  // Compaction changes the provider-visible tail without a turn_end.
+  pi.on("session_compact", async (_event, ctx) => {
+    if (currentConfig.value.pruneOn === "on-demand") {
+      setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length));
+    }
   });
 
   // ── turn_end: capture batch, flush immediately or queue ──────────────────
@@ -371,20 +381,32 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const capturedBatch = captureBatch(
-      event.message,
-      event.toolResults,
-      event.turnIndex,
-      Date.now()
+    // Pi's event.turnIndex restarts for each agent run, while the frontier is
+    // session-relative. Find the persisted assistant turn before comparing them.
+    const resultIds = new Set(event.toolResults.map((result) => result.toolCallId));
+    let sessionTurnIndex = 0;
+    let matchedTurnIndex: number | null = null;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+      if (entry.message.content?.some((block: any) => block.type === "toolCall" && resultIds.has(block.id))) {
+        matchedTurnIndex = sessionTurnIndex;
+        break;
+      }
+      sessionTurnIndex++;
+    }
+    const capturedBatch = matchedTurnIndex === null ? null : captureBatch(
+      event.message, event.toolResults, matchedTurnIndex, Date.now(),
     );
-    const batch = trimBatchToPendingRange({
+    const batch = capturedBatch && trimBatchToPendingRange({
       ...capturedBatch,
-      // Do not summarize the pruner's own housekeeping tool result. Otherwise
-      // agentic-auto mode can queue the context_prune result and try to flush it
-      // during agent_end, when Pi may already have invalidated the extension ctx.
       toolCalls: capturedBatch.toolCalls.filter((tc) => tc.toolName !== CONTEXT_PRUNE_TOOL_NAME),
     });
-    if (!batch) return;
+    if (!batch) {
+      if (currentConfig.value.pruneOn === "on-demand" && currentConfig.value.showPruneStatusLine) {
+        setPruneStatusWidget(ctx, currentConfig.value, pruneStatusText(currentConfig.value, statsAccum.getStats(), capturePendingBatches(ctx).length));
+      }
+      return;
+    }
 
     pendingBatches.push(batch);
 

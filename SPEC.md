@@ -34,7 +34,7 @@ When scanning a session branch:
 - only the active tail retained after the latest compaction is eligible;
 - a tool call is eligible only when its matching result exists and is not already indexed;
 - pruner housekeeping calls are excluded from capture;
-- turn indexes remain stable across prune cycles; and
+- turn indexes remain stable across prune cycles and session compaction: `turn_end` indexes are agent-run-local and must be resolved against the persisted assistant entry before comparing them to the session-relative frontier; and
 - batching may merge related captured batches, but must not change the tool-call identity of a batch member.
 
 ## 4. Flush lifecycle
