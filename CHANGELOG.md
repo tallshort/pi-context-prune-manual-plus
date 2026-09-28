@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.8.0]
+
 ### Changed
 
 - Refactored `/pruner` command dispatch into focused handlers and table-driven routing while preserving existing commands, notifications, settings, and progress behavior.
