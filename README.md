@@ -439,7 +439,7 @@ The extension registers a status widget in the Pi footer that shows the current 
 
 - `prune: OFF (On agent message)` — pruning disabled, showing what mode it would use
 - `prune: ON (On agent message)` — pruning active with the current trigger mode
-- `prune: ON (Every turn) │ ↑1.2k ↓340 $0.003` — pruning active with cumulative stats (input/output tokens, cost)
+- `prune: ON (Every turn) | ↑1.2k ↓340 $0.003` — pruning active with cumulative stats (input/output tokens, cost)
 - `prune: 3 pending` — batches queued, waiting for the trigger
 - `prune: summarizing…` — currently running the summarizer LLM call
 - Live progress details are shown in richer surfaces instead: `/pruner now` uses a focusable centered overlay (up to 16 rows), and agentic-auto `context_prune` streams updates in the tool output box above the input

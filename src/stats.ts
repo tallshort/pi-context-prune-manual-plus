@@ -184,9 +184,9 @@ export function formatTheoreticalSavings(
 
 /**
  * Build the stats suffix for the status widget.
- * Returns something like " │ ↑1.2k ↓340 $0.003" or "" if no calls yet.
+ * Returns something like " | ↑1.2k ↓340 $0.003" or "" if no calls yet.
  */
 export function statsSuffix(stats: SummarizerStats): string {
   if (stats.callCount === 0) return "";
-  return ` │ ↑${formatTokens(stats.totalInputTokens)} ↓${formatTokens(stats.totalOutputTokens)} ${formatCost(stats.totalCost)}`;
+  return ` | ↑${formatTokens(stats.totalInputTokens)} ↓${formatTokens(stats.totalOutputTokens)} ${formatCost(stats.totalCost)}`;
 }

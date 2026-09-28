@@ -57,7 +57,7 @@ export function pruneStatusText(config: ContextPruneConfig, stats?: SummarizerSt
   const pending = config.pruneOn === "on-demand" && pendingCount > 0 ? `, ${pendingCount} pending` : "";
   let text = `prune: ${config.enabled ? "ON" : "OFF"} (${mode}${pending})`;
   if (stats && stats.callCount > 0) {
-    text += ` │ ↑${formatTokens(stats.totalInputTokens)} ↓${formatTokens(stats.totalOutputTokens)} ${formatCost(stats.totalCost)}`;
+    text += ` | ↑${formatTokens(stats.totalInputTokens)} ↓${formatTokens(stats.totalOutputTokens)} ${formatCost(stats.totalCost)}`;
   }
   return text;
 }
