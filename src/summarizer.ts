@@ -7,6 +7,7 @@ import type {
   SummarizeBatchOptions,
   SummarizeBatchesOptions,
   SummarizeResult,
+  SummarizeSkippedOversized,
   SummarizeFailure,
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
@@ -115,7 +116,7 @@ export async function summarizeBatch(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions = {}
-): Promise<SummarizeResult | SummarizeFailure> {
+): Promise<SummarizeResult | SummarizeFailure | SummarizeSkippedOversized> {
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
@@ -148,6 +149,10 @@ export async function summarizeBatch(
     // Use the provider-owned stream API directly. The compatibility registry
     // facade still exposes auth/header resolution, but no longer exposes a
     // top-level stream() helper of its own.
+    const sizeController = new AbortController();
+    const providerSignal = options.signal
+      ? AbortSignal.any([options.signal, sizeController.signal])
+      : sizeController.signal;
     const responseStream = provider.stream(
       auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
       normalizeContext({
@@ -163,12 +168,15 @@ export async function summarizeBatch(
         apiKey: auth.apiKey,
         headers: auth.headers,
         env: auth.env,
-        signal: options.signal,
+        signal: providerSignal,
         ...summarizerThinkingOptions(config),
       }
     );
 
     let lastReportedChars = -1;
+    let oversizedChars: number | undefined;
+    let lastPartialWithUsage: AssistantMessage | undefined;
+    const rawCharCount = batch.toolCalls.reduce((sum, call) => sum + call.resultText.length, 0);
     options.onTextProgress?.(0);
     const reportTextProgress = (message: AssistantMessage) => {
       const chars = receivedTextChars(message);
@@ -176,26 +184,43 @@ export async function summarizeBatch(
         lastReportedChars = chars;
         options.onTextProgress?.(chars);
       }
+      if (!options.signal?.aborted && chars > rawCharCount && oversizedChars === undefined) {
+        oversizedChars = chars;
+        sizeController.abort();
+      }
     };
 
-    for await (const event of responseStream) {
-      // Belt-and-suspenders: break early when signal fires mid-stream.
-      if (options.signal?.aborted) break;
-      if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
-        reportTextProgress(event.partial);
+    try {
+      for await (const event of responseStream) {
+        if (options.signal?.aborted || oversizedChars !== undefined) break;
+        if ("partial" in event && event.partial?.usage) lastPartialWithUsage = event.partial;
+        if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
+          reportTextProgress(event.partial);
+        }
       }
+    } catch (error) {
+      if (oversizedChars === undefined) throw error;
+      // Some providers reject iteration when their local size signal is aborted.
     }
 
-    // Resolve the final response even after cancellation: providers may return
-    // partial usage that must be accounted although the summary is discarded.
-    const response = await responseStream.result();
-    if (response.usage) {
-      try {
-        options.onUsage?.(response);
-      } catch {
-        // Accounting must never change whether summarization succeeds.
+    // Providers may return partial usage even when the stream is stopped early.
+    const accountUsage = (message: AssistantMessage | undefined) => {
+      if (!message?.usage) return;
+      try { options.onUsage?.(message); } catch { /* Accounting must not change the outcome. */ }
+    };
+    let response: AssistantMessage;
+    try {
+      response = await responseStream.result();
+    } catch (error) {
+      if (oversizedChars !== undefined) {
+        accountUsage(lastPartialWithUsage);
+        return { skippedOversized: true, summaryCharCount: oversizedChars };
       }
+      throw error;
     }
+    // Prefer final usage; fall back to the last streamed value only for a size skip.
+    accountUsage(response.usage ? response : oversizedChars !== undefined ? lastPartialWithUsage : undefined);
+    if (oversizedChars !== undefined) return { skippedOversized: true, summaryCharCount: oversizedChars };
     if (options.signal?.aborted) throw new Error("summarizeBatch: aborted during stream");
     reportTextProgress(response);
     // stopReason "aborted" means the provider cut the stream short (e.g. signal
@@ -247,7 +272,7 @@ export async function summarizeBatches(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchesOptions = {}
-): Promise<Array<SummarizeResult | SummarizeFailure>> {
+): Promise<Array<SummarizeResult | SummarizeFailure | SummarizeSkippedOversized>> {
   if (batches.length === 0) return [];
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {
@@ -277,5 +302,5 @@ export async function summarizeBatches(
   );
   const failure = settled.find((result) => result.status === "rejected");
   if (failure?.status === "rejected") throw failure.reason;
-  return settled.map((result) => (result as PromiseFulfilledResult<SummarizeResult | SummarizeFailure>).value);
+  return settled.map((result) => (result as PromiseFulfilledResult<SummarizeResult | SummarizeFailure | SummarizeSkippedOversized>).value);
 }

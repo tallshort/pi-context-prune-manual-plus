@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file.
 - Corrected per-turn pending capture after an agent run restarts its turn counter: frontier comparisons now use session-relative turn indexes, so on-demand pending status updates during long runs and automatic flushes are not skipped.
 - Refresh the on-demand pending footer after compaction and branch navigation so it reflects the currently visible session tail.
 - On session reopen, show existing pending batches immediately; avoid showing a pending count while pruning is disabled. Refresh all trigger modes from the current session projection after branch navigation, compaction, tool turns, and agent completion, clearing stale footer counts.
+- Skip individual streamed summaries once their generated text exceeds the raw tool-result length, and reject completed summaries that are not strictly shorter after rendering. Preserve raw results, record available final or partial provider usage once, and persist oversized skips across reloads without crossing failed-batch frontier gaps.
 
 ## [1.7.0]
 

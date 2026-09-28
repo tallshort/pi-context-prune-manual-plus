@@ -36,6 +36,7 @@ import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
 import { hydrateSessionState } from "./src/session-hydration.js";
+import { SkippedOversizedTracker } from "./src/skipped-oversized.js";
 import { createSummarizerUsageReporter, type UsageSession } from "./src/usage-report.js";
 
 export default function (pi: ExtensionAPI) {
@@ -67,11 +68,12 @@ export default function (pi: ExtensionAPI) {
 
   // Shared prune frontier — tracks the last completed prune attempt boundary
   const frontier = new PruneFrontierTracker();
+  const skippedOversized = new SkippedOversizedTracker();
   // Rebuilt on lifecycle events and defensively before the first context hook.
   let hydrated = false;
   const hydrateFromSession = (ctx: any): boolean => {
     try {
-      hydrateSessionState(ctx, indexer, statsAccum, frontier);
+      hydrateSessionState(ctx, indexer, statsAccum, frontier, skippedOversized);
       hydrated = true;
       return true;
     } catch {
@@ -80,6 +82,7 @@ export default function (pi: ExtensionAPI) {
       indexer.reset();
       statsAccum.reset();
       frontier.reset();
+      skippedOversized.reset();
       hydrated = false;
       return false;
     }
@@ -140,7 +143,7 @@ export default function (pi: ExtensionAPI) {
     let toolCalls = batch.toolCalls;
 
     // The indexer tells us what was successfully summarized earlier.
-    toolCalls = toolCalls.filter((tc) => !indexer.isSummarized(tc.toolCallId));
+    toolCalls = toolCalls.filter((tc) => !indexer.isSummarized(tc.toolCallId) && !skippedOversized.isSkipped(tc.toolCallId));
     if (toolCalls.length === 0) return null;
 
     // The frontier tells us the last attempted boundary even when the attempt did
@@ -295,6 +298,7 @@ export default function (pi: ExtensionAPI) {
         state: {
           indexer,
           frontier,
+          skippedOversized,
           stats: statsAccum,
           deferredSummaries,
         },

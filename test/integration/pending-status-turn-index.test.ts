@@ -4,7 +4,7 @@ const { loadConfig } = vi.hoisted(() => ({ loadConfig: vi.fn() }));
 vi.mock("../../src/config.js", () => ({ loadConfig }));
 
 import extension from "../../index.js";
-import { DEFAULT_CONFIG, CUSTOM_TYPE_FRONTIER } from "../../src/types.js";
+import { DEFAULT_CONFIG, CUSTOM_TYPE_FRONTIER, CUSTOM_TYPE_SKIPPED_OVERSIZED } from "../../src/types.js";
 
 function toolTurn(id: string, name = "read") {
   const assistant = { type: "message", id: `assistant-${id}`, timestamp: "2026-01-01T00:00:00Z", message: { role: "assistant", content: [{ type: "toolCall", id, name, input: {} }] } };
@@ -36,6 +36,17 @@ describe("on-demand pending status across agent runs", () => {
     loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-demand", showPruneStatusLine: true });
     const { handlers, statuses, ctx } = harness();
     await handlers.get("session_start")!({}, ctx);
+    expect(statuses.at(-1)).toContain("1 pending");
+  });
+
+  it("keeps an out-of-order oversized skip excluded after reload and scopes it to the active branch", async () => {
+    loadConfig.mockResolvedValue({ ...DEFAULT_CONFIG, enabled: true, pruneOn: "on-demand", showPruneStatusLine: true });
+    const { handlers, statuses, entries, ctx } = harness();
+    entries.push({ type: "custom", customType: CUSTOM_TYPE_SKIPPED_OVERSIZED, data: { toolCallIds: ["earlier"] } });
+    await handlers.get("session_start")!({}, ctx);
+    expect(statuses.at(-1)).not.toContain("pending");
+    entries.pop();
+    await handlers.get("session_tree")!({}, ctx);
     expect(statuses.at(-1)).toContain("1 pending");
   });
 

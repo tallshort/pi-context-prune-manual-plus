@@ -106,3 +106,57 @@ describe("summarizer usage callback", () => {
     expect(reported).toEqual([response]);
   });
 });
+
+describe("oversized streamed summaries", () => {
+  it("aborts only this provider stream, reports partial usage, and returns a skip instead of a retryable failure", async () => {
+    const partial = { ...contextFor({}).model, role: "assistant", content: [{ type: "text", text: "x".repeat(4) }] };
+    const final = { ...partial, usage, stopReason: "aborted" };
+    const stream = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "text_delta", partial };
+        throw new Error("must not consume the next chunk");
+      },
+      result: async () => final,
+    };
+    let providerSignal: AbortSignal | undefined;
+    const ctx = contextFor(final);
+    ctx.modelRegistry.getProvider = () => ({ stream: (_model: unknown, _input: unknown, options: { signal: AbortSignal }) => {
+      providerSignal = options.signal;
+      return stream;
+    } });
+    const reported: any[] = [];
+    const result = await summarizeBatch(batch, DEFAULT_CONFIG, ctx, { onUsage: (message) => reported.push(message) });
+    expect(providerSignal?.aborted).toBe(true);
+    expect(result).toEqual({ skippedOversized: true, summaryCharCount: 4 });
+    expect(reported).toEqual([final]);
+  });
+
+  it("keeps streamed partial usage if the provider rejects result after size abort", async () => {
+    const partial = { role: "assistant", content: [{ type: "text", text: "xxxx" }], usage };
+    const ctx = contextFor({});
+    ctx.modelRegistry.getProvider = () => ({ stream: () => ({
+      async *[Symbol.asyncIterator]() { yield { type: "text_delta", partial }; },
+      result: async () => { throw new Error("aborted"); },
+    }) });
+    const reported: any[] = [];
+    expect(await summarizeBatch(batch, DEFAULT_CONFIG, ctx, { onUsage: (message) => reported.push(message) }))
+      .toEqual({ skippedOversized: true, summaryCharCount: 4 });
+    expect(reported).toEqual([partial]);
+  });
+
+  it("uses the last streamed partial usage when an oversized provider returns without usage", async () => {
+    const partial = { role: "assistant", content: [{ type: "text", text: "xxxx" }], usage };
+    const final = { role: "assistant", content: partial.content, stopReason: "aborted" };
+    const ctx = contextFor(final, [{ type: "text_delta", partial }]);
+    const reported: any[] = [];
+    expect(await summarizeBatch(batch, DEFAULT_CONFIG, ctx, { onUsage: (message) => reported.push(message) }))
+      .toEqual({ skippedOversized: true, summaryCharCount: 4 });
+    expect(reported).toEqual([partial]);
+  });
+
+  it("does not abort a stream whose text fits the raw budget", async () => {
+    const response = { role: "assistant", content: [{ type: "text", text: "ok" }], usage, stopReason: "stop" };
+    const result = await summarizeBatch(batch, DEFAULT_CONFIG, contextFor(response, [{ type: "text_delta", partial: response }]));
+    expect(result).toMatchObject({ summaryText: "ok" });
+  });
+});

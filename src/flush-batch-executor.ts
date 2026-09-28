@@ -9,9 +9,10 @@ import type {
   FlushOptions,
   SummarizeFailure,
   SummarizeResult,
+  SummarizeSkippedOversized,
 } from "./types.js";
 
-export type FlushBatchResult = SummarizeResult | SummarizeFailure | { skippedSmall: true } | null;
+export type FlushBatchResult = SummarizeResult | SummarizeFailure | SummarizeSkippedOversized | { skippedSmall: true } | null;
 
 export interface FlushBatchExecution {
   batch: CapturedBatch;
@@ -158,7 +159,9 @@ async function executeManualBatches({
       }, flushOptions.signal, () => stats.addRetry());
 
       execution.result = retry.value;
-      if (isSummarizeFailure(execution.result)) {
+      if ("skippedOversized" in execution.result) {
+        flushOptions.onProgress!(index, executions.length, batch, "skipped");
+      } else if (isSummarizeFailure(execution.result)) {
         stats.addFinalFailure(execution.result.failureKind);
         flushOptions.onProgress!(index, executions.length, batch, "failed", {
           attempts: retry.attempts,

@@ -56,6 +56,9 @@ export const CUSTOM_TYPE_STATS = "context-prune-stats";
 /** customType for prune-frontier persistence entries (NOT in LLM context) */
 export const CUSTOM_TYPE_FRONTIER = "context-prune-frontier";
 
+/** Durable exclusion for a completed oversized batch behind a frontier gap. */
+export const CUSTOM_TYPE_SKIPPED_OVERSIZED = "context-prune-skipped-oversized";
+
 /** Footer status widget ID */
 export const STATUS_WIDGET_ID = "context-prune";
 
@@ -420,6 +423,12 @@ export interface FlushOptions {
    * batches are scheduled, but already-started summaries finish and are kept.
    */
   signal?: AbortSignal;
+}
+
+export interface SummarizeSkippedOversized {
+  skippedOversized: true;
+  /** Streamed text count at the point the provider was stopped. */
+  summaryCharCount: number;
 }
 
 /** Options for a single summarizeBatch() call. */

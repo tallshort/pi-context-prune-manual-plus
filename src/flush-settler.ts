@@ -3,6 +3,7 @@ import { DeferredSummaryCache } from "./deferred-summary-cache.js";
 import { planFlushSettlement } from "./flush-settlement.js";
 import { isSummarizeFailure, type FlushBatchExecution } from "./flush-batch-executor.js";
 import { PruneFrontierTracker } from "./frontier.js";
+import { SkippedOversizedTracker } from "./skipped-oversized.js";
 import { ToolCallIndexer } from "./indexer.js";
 import { StatsAccumulator } from "./stats.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./summary-refs.js";
@@ -27,6 +28,7 @@ interface FlushDelivery {
 interface FlushSettlementState {
   indexer: ToolCallIndexer;
   frontier: PruneFrontierTracker;
+  skippedOversized: SkippedOversizedTracker;
   stats: StatsAccumulator;
   deferredSummaries: DeferredSummaryCache<SummarizeResult>;
 }
@@ -62,7 +64,7 @@ interface BatchMetric {
 export function settleFlushBatches(options: SettleFlushOptions): FlushResult {
   const { config, flushOptions, executions, wasCancelled } = options;
   const { pi, mode: delivery, sessionManager } = options.delivery;
-  const { indexer, frontier, stats, deferredSummaries } = options.state;
+  const { indexer, frontier, skippedOversized, stats, deferredSummaries } = options.state;
   const {
     restoreBatches, persistStats, updateStatus, safeNotify, isStaleContextError, errorMessage,
   } = options.lifecycle;
@@ -70,6 +72,38 @@ export function settleFlushBatches(options: SettleFlushOptions): FlushResult {
     executions.map(({ result }) => result !== null && !isSummarizeFailure(result)),
     wasCancelled,
   );
+  // Determine the final rendered size for every completed batch before any
+  // ordered commits: a later skip must survive even if an earlier write fails.
+  const renderedSummaries = new Map<number, {
+    summaryText: string;
+    summaryRefs: ReturnType<ToolCallIndexer["allocateSummaryRefs"]>;
+    oversized: boolean;
+  }>();
+  const skipWriteErrors: unknown[] = [];
+  for (const [index, { batch, result, rawCharCount }] of executions.entries()) {
+    if (!result || isSummarizeFailure(result) || "skippedSmall" in result) continue;
+    let oversized: boolean;
+    if ("skippedOversized" in result) {
+      oversized = true;
+    } else {
+      const summaryRefs = indexer.allocateSummaryRefs(batch);
+      const summaryText = wrapSummaryForContext(result.summaryText + formatSummaryToolCallRefs(summaryRefs));
+      oversized = summaryText.length >= rawCharCount;
+      renderedSummaries.set(index, { summaryText, summaryRefs, oversized });
+    }
+    if (!oversized) continue;
+    try {
+      skippedOversized.mark(batch, (type, data) => {
+        if (delivery === "runtime") pi.appendEntry(type, data);
+        else sessionManager!.appendCustomEntry(type, data);
+      });
+    } catch (error) {
+      // One failed marker must not prevent other completed batches from being saved.
+      skipWriteErrors.push(error);
+    }
+  }
+  // Do not settle or claim an unrecorded skip; the caller restores pending work.
+  if (skipWriteErrors.length > 0) throw skipWriteErrors[0];
   const processedBatches: CapturedBatch[] = [];
   const processedIndexes = new Set<number>();
   const batchMetrics = new Map<number, BatchMetric>();
@@ -98,9 +132,18 @@ export function settleFlushBatches(options: SettleFlushOptions): FlushResult {
       continue;
     }
 
-    const summaryRefs = indexer.allocateSummaryRefs(batch);
-    const summaryText = wrapSummaryForContext(result.summaryText + formatSummaryToolCallRefs(summaryRefs));
-    const oversized = summaryText.length > rawCharCount;
+    if ("skippedOversized" in result) {
+      totalRawCharCount += rawCharCount;
+      totalSummaryCharCount += result.summaryCharCount;
+      totalToolCallCount += batch.toolCalls.length;
+      batchMetrics.set(index, metricFor(batch, rawCharCount, result.summaryCharCount, false, true));
+      oversizedExecutions.push(execution);
+      processedBatches.push(batch);
+      processedIndexes.add(index);
+      continue;
+    }
+
+    const { summaryRefs, summaryText, oversized } = renderedSummaries.get(index)!;
     totalRawCharCount += rawCharCount;
     totalSummaryCharCount += summaryText.length;
     totalToolCallCount += batch.toolCalls.length;
@@ -144,6 +187,7 @@ export function settleFlushBatches(options: SettleFlushOptions): FlushResult {
     processedIndexes,
     manual: flushOptions.onProgress !== undefined,
     deferredSummaries,
+    skippedOversized,
     restoreBatches,
   });
 
@@ -211,13 +255,15 @@ function restoreUnfinishedWork(options: {
   processedIndexes: Set<number>;
   manual: boolean;
   deferredSummaries: DeferredSummaryCache<SummarizeResult>;
+  skippedOversized: SkippedOversizedTracker;
   restoreBatches: (batches: CapturedBatch[]) => void;
 }): void {
-  const restoreIndexes = new Set(options.settlementRestoreIndexes);
+  const isSkipped = (index: number) => options.executions[index].batch.toolCalls.every((call) => options.skippedOversized.isSkipped(call.toolCallId));
+  const restoreIndexes = new Set(options.settlementRestoreIndexes.filter((index) => !isSkipped(index)));
   if (options.manual) {
     for (const index of restoreIndexes) {
       const { batch, result } = options.executions[index];
-      if (result && !isSummarizeFailure(result) && !("skippedSmall" in result)) {
+      if (result && !isSummarizeFailure(result) && !("skippedSmall" in result) && !("skippedOversized" in result)) {
         options.deferredSummaries.set(batch, result);
       }
     }
@@ -225,7 +271,7 @@ function restoreUnfinishedWork(options: {
   for (const index of options.processedIndexes) options.deferredSummaries.delete(options.executions[index].batch);
   if (options.persistenceFailureIndex !== undefined) {
     for (let index = options.persistenceFailureIndex; index < options.executions.length; index += 1) {
-      restoreIndexes.add(index);
+      if (!isSkipped(index)) restoreIndexes.add(index);
     }
   }
   options.restoreBatches([...restoreIndexes].sort((a, b) => a - b).map((index) => options.executions[index].batch));
@@ -286,9 +332,13 @@ function notifyOversizedBatches(
 ): void {
   if (!config.notifySkipped) return;
   for (const { batch, result, rawCharCount } of oversizedExecutions) {
-    const summaryChars = result && !isSummarizeFailure(result) && !("skippedSmall" in result) ? result.summaryText.length : 0;
+    let summaryChars = 0;
+    if (result && !isSummarizeFailure(result)) {
+      if ("skippedOversized" in result) summaryChars = result.summaryCharCount;
+      else if (!("skippedSmall" in result)) summaryChars = result.summaryText.length;
+    }
     safeNotify(
-      `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${summaryChars} chars vs ${rawCharCount} raw chars; frontier advanced past this range`,
+      `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${summaryChars} chars vs ${rawCharCount} raw chars; batch recorded as skipped`,
       "warning",
     );
   }

@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CapturedBatch } from "../../src/types.js";
-import { CUSTOM_TYPE_STATS } from "../../src/types.js";
+import { CUSTOM_TYPE_FRONTIER, CUSTOM_TYPE_STATS } from "../../src/types.js";
+import { formatSummaryToolCallRefs, wrapSummaryForContext } from "../../src/summary-refs.js";
 
 const harness = vi.hoisted(() => ({
   agentDir: "",
@@ -73,17 +74,20 @@ type FinalResponse = ReturnType<typeof response>;
 function setup(
   responses: FinalResponse | FinalResponse[],
   appendUsage: ReturnType<typeof vi.fn>,
-  options: { sendMessage?: () => void; resultGate?: Promise<void> } = {},
+  options: { sendMessage?: () => void; resultGate?: Promise<void>; streamed?: boolean; rejectResultWhenAborted?: boolean; streamedPartialUsage?: boolean } = {},
 ) {
   const entries: Array<{ customType: string; data: any }> = [];
   const responseQueue = Array.isArray(responses) ? [...responses] : [responses];
   const fallbackResponse = responseQueue[responseQueue.length - 1];
-  const stream = vi.fn(() => {
+  const stream = vi.fn((_model: unknown, _context: unknown, streamOptions?: { signal?: AbortSignal }) => {
     const finalResponse = responseQueue.shift() ?? fallbackResponse;
     return {
-      async *[Symbol.asyncIterator]() {},
+      async *[Symbol.asyncIterator]() {
+        if (options.streamed) yield { type: "text_delta", partial: options.streamedPartialUsage ? { ...finalResponse, usage } : finalResponse };
+      },
       result: async () => {
         await options.resultGate;
+        if (options.rejectResultWhenAborted && streamOptions?.signal?.aborted) throw new Error("provider aborted");
         return finalResponse;
       },
     };
@@ -112,8 +116,7 @@ function setup(
     },
     ui: { notify: vi.fn(), setStatus: vi.fn() },
   } as any;
-
-  return { ctx, entries, stream };
+  return { ctx, entries, stream, pi };
 }
 function latestStats(entries: Array<{ customType: string; data: any }>) {
   return entries.filter((entry) => entry.customType === CUSTOM_TYPE_STATS).at(-1)?.data;
@@ -339,5 +342,151 @@ describe("flush usage accounting", () => {
     expect(result).toMatchObject({ ok: true, reason: "cancelled" });
     expect(appendUsage).toHaveBeenCalledTimes(1);
     expect(latestStats(entries)).toMatchObject({ callCount: 1, totalCost: 0.1 });
+  });
+  it("advances the frontier without pruning raw output on an automatic oversized stream", async () => {
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream, pi } = setup(response("s".repeat(701), { stopReason: "aborted" }), appendUsage, { streamed: true });
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(700)] });
+    expect(result).toMatchObject({ ok: true, reason: "skipped-oversized", batchCount: 1 });
+    expect(stream.mock.calls[0][2].signal.aborted).toBe(true);
+    expect(entries.filter(({ customType }) => customType === CUSTOM_TYPE_FRONTIER).at(-1)?.data)
+      .toMatchObject({ outcome: "skipped-oversized", attemptedBatchCount: 1 });
+    expect(appendUsage).toHaveBeenCalledTimes(1);
+    expect(latestStats(entries)).toMatchObject({ callCount: 1 });
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+  it("accounts for partial usage once when an oversized result resolves without usage", async () => {
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup(response("s".repeat(701), { stopReason: "aborted", usage: undefined }), appendUsage, {
+      streamed: true, streamedPartialUsage: true,
+    });
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(700)] });
+    expect(result).toMatchObject({ ok: true, reason: "skipped-oversized" });
+    expect(appendUsage).toHaveBeenCalledOnce();
+    expect(latestStats(entries)).toMatchObject({ callCount: 1 });
+  });
+
+  it("keeps available partial usage when an oversized provider result rejects", async () => {
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup(response("s".repeat(701), { stopReason: "aborted" }), appendUsage, {
+      streamed: true, rejectResultWhenAborted: true,
+    });
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(700)] });
+    expect(result).toMatchObject({ ok: true, reason: "skipped-oversized" });
+    expect(appendUsage).toHaveBeenCalledTimes(1);
+    expect(latestStats(entries)).toMatchObject({ callCount: 1 });
+  });
+
+  it("persists an out-of-order oversized skip when an earlier concurrent batch fails", async () => {
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup([
+      response("", { stopReason: "error", errorMessage: "invalid credentials" }),
+      response("s".repeat(701), { stopReason: "aborted" }),
+    ], appendUsage, { streamed: true });
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(700, "failed", 1), batch(700, "oversized", 2)],
+      onProgress: vi.fn(),
+    });
+    expect(result).toMatchObject({ ok: false, reason: "summarizer-failed" });
+    expect(entries).toContainEqual(expect.objectContaining({
+      customType: "context-prune-skipped-oversized",
+      data: { toolCallIds: ["oversized"] },
+    }));
+    expect(entries.filter(({ customType }) => customType === CUSTOM_TYPE_FRONTIER)).toHaveLength(0);
+  });
+
+  it("does not claim a skip if its independent persistence write fails", async () => {
+    const { ctx, entries, pi } = setup(response("s".repeat(701), { stopReason: "aborted" }), vi.fn(), { streamed: true });
+    pi.appendEntry.mockImplementation(() => { throw new Error("skip persistence unavailable"); });
+    const failed = await harness.flush!(ctx, { previewedBatches: [batch(700)] });
+    expect(failed).toMatchObject({ ok: false, reason: "failed" });
+    expect(entries).not.toContainEqual(expect.objectContaining({ customType: "context-prune-skipped-oversized" }));
+    pi.appendEntry.mockImplementation((customType: string, data: unknown) => {
+      entries.push({ customType, data });
+      return `entry-${entries.length}`;
+    });
+    expect(await harness.flush!(ctx, { previewedBatches: [batch(700)] }))
+      .toMatchObject({ ok: true, reason: "skipped-oversized" });
+  });
+
+  it("records a later streamed skip before an earlier summary persistence fails", async () => {
+    const { ctx, entries } = setup([response("short"), response("s".repeat(701), { stopReason: "aborted" })], vi.fn(), {
+      streamed: true, sendMessage: () => { throw new Error("This extension ctx is stale"); },
+    });
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(700, "first", 1), batch(700, "oversized", 2)], onProgress: vi.fn(),
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(entries).toContainEqual(expect.objectContaining({
+      customType: "context-prune-skipped-oversized", data: { toolCallIds: ["oversized"] },
+    }));
+  });
+
+  it("records a later rendered-oversized skip despite an earlier provider failure", async () => {
+    const { ctx, entries, stream } = setup([
+      response("", { stopReason: "error", errorMessage: "invalid credentials" }),
+      response("s".repeat(680)),
+    ], vi.fn(), { streamed: true });
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(700, "failed", 1), batch(700, "rendered-oversized", 2)], onProgress: vi.fn(),
+    });
+    expect(result).toMatchObject({ ok: false, reason: "summarizer-failed" });
+    expect(stream.mock.calls[1][2].signal.aborted).toBe(false);
+    expect(entries).toContainEqual(expect.objectContaining({
+      customType: "context-prune-skipped-oversized", data: { toolCallIds: ["rendered-oversized"] },
+    }));
+    expect(entries.filter(({ customType }) => customType === CUSTOM_TYPE_FRONTIER)).toHaveLength(0);
+  });
+  it("attempts every independent skip marker even if an earlier marker write fails", async () => {
+    const { ctx, entries, pi } = setup([
+      response("s".repeat(701), { stopReason: "aborted" }),
+      response("s".repeat(701), { stopReason: "aborted" }),
+    ], vi.fn(), { streamed: true });
+    const append = pi.appendEntry.getMockImplementation();
+    pi.appendEntry.mockImplementation((customType: string, data: any) => {
+      if (customType === "context-prune-skipped-oversized" && data.toolCallIds.includes("first")) {
+        throw new Error("first marker unavailable");
+      }
+      return append(customType, data);
+    });
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(700, "first", 1), batch(700, "second", 2)], onProgress: vi.fn(),
+    });
+    expect(result).toMatchObject({ ok: false, reason: "failed" });
+    expect(entries.filter(({ customType }) => customType === "context-prune-skipped-oversized"))
+      .toEqual([{ customType: "context-prune-skipped-oversized", data: { toolCallIds: ["second"] } }]);
+    expect(entries.filter(({ customType }) => customType === CUSTOM_TYPE_FRONTIER)).toHaveLength(0);
+  });
+
+  it("keeps raw results when the fully rendered summary exactly matches raw length", async () => {
+    const rawChars = 700;
+    const refs = [{ shortId: "t1", toolCallId: "equal" }];
+    const overhead = wrapSummaryForContext(formatSummaryToolCallRefs(refs)).length;
+    const summary = "s".repeat(rawChars - overhead);
+    expect(wrapSummaryForContext(summary + formatSummaryToolCallRefs(refs))).toHaveLength(rawChars);
+    const { ctx, entries, pi } = setup(response(summary), vi.fn());
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(rawChars, "equal")] });
+    expect(result).toMatchObject({ ok: true, reason: "skipped-oversized" });
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+    expect(entries).toContainEqual(expect.objectContaining({
+      customType: "context-prune-skipped-oversized", data: { toolCallIds: ["equal"] },
+    }));
+  });
+
+  it("stops an oversized streamed batch, accounts usage, and settles the next batch normally", async () => {
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream } = setup([response("s".repeat(701), { stopReason: "aborted" }), response("short")], appendUsage, { streamed: true });
+    const progress: Array<[number, string]> = [];
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(700, "first", 1), batch(700, "second", 2)],
+      onProgress: (index: number, _total: number, _batch: CapturedBatch, stage: string) => progress.push([index, stage]),
+    });
+    expect(result).toMatchObject({ ok: true, reason: "flushed", batchCount: 2 });
+    expect(progress).toContainEqual([0, "skipped"]);
+    expect(progress).toContainEqual([1, "done"]);
+    expect(stream.mock.calls[0][2].signal.aborted).toBe(true);
+    expect(stream.mock.calls[1][2].signal.aborted).toBe(false);
+    expect(appendUsage).toHaveBeenCalledTimes(2);
+    expect(latestStats(entries)).toMatchObject({ callCount: 2 });
   });
 });

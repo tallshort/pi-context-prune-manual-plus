@@ -15,7 +15,7 @@ Future improvements that preserve the core context-pruning algorithm.
 
 ## Summarization policy and compaction
 
-- [ ] Stop an in-progress batch summary early when streamed output clearly exceeds the original tool-result character budget; keep the raw result and preserve partial usage accounting, concurrent-batch settlement, frontier behavior, and manual cancellation semantics.
+- [ ] Stop an in-progress batch summary early when streamed output clearly exceeds the original tool-result character budget; keep the raw result and preserve partial usage accounting, concurrent-batch settlement, frontier behavior, and manual cancellation semantics. (implemented; awaiting manual verification)
 - [ ] Batch multiple turn summaries into a meta-summary at compaction time.
 - [ ] Add a token-count threshold for pruning once reliable per-tool-result token counts are available.
 ## Visibility and maintenance
