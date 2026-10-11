@@ -4,9 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.8.1]
+
 ### Fixed
 
 - Stop the first runaway summary of a large result after 4,000 streamed characters and retry once with a concise prompt. The retry is bounded by the original result length, not the 4,000-character soft limit: accept a shorter rendered summary or retain the original and persist an oversized skip. Account for both provider calls, preserve manual cancellation, and show the retry in `/pruner now`.
+- Honor the shared provider cooldown before starting a concise retry; leave the batch pending without making or counting a blocked provider request.
+- Keep the `/pruner now` retry count visible while a retried batch runs, including the cumulative count when a provider retry is followed by a concise retry.
 
 ## [1.8.0]
 
