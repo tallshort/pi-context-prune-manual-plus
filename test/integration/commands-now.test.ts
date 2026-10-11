@@ -115,6 +115,7 @@ describe("/pruner now", () => {
     const theme = { fg: (color: string, text: string) => `<${color}>${text}</${color}>` };
     let overlay: { render(width: number): string[] } | undefined;
     let release: (() => void) | undefined;
+    let retryFrame = "";
     const ui = {
       custom: vi.fn((factory: any, options: any) => new Promise<void>((resolve) => {
         overlay = factory(rendered, theme, { matches: () => false }, resolve);
@@ -127,6 +128,8 @@ describe("/pruner now", () => {
     const flushPending = vi.fn(async (_ctx: unknown, options?: FlushOptions) => {
       options?.onProgress?.(0, 1, batches[0], "start", { attempts: 1, retryCount: 0 });
       options?.onProgress?.(0, 1, batches[0], "retry", { attempts: 1, retryCount: 1, failureKind: "rate-limit", failureMessage: "rate limited" });
+      retryFrame = overlay?.render(100).join("\n") ?? "";
+      options?.onProgress?.(0, 1, batches[0], "start", { attempts: 2, retryCount: 1 });
       await new Promise<void>((resolve) => { release = resolve; });
       options?.onProgress?.(0, 1, batches[0], "failed", { attempts: 2, retryCount: 1, failureKind: "network", failureMessage: "network error" });
       return { ok: false as const, reason: "summarizer-failed" };
@@ -135,7 +138,8 @@ describe("/pruner now", () => {
     registerCommands({ registerCommand: command.register, registerMessageRenderer: vi.fn() } as any, { value: { ...DEFAULT_CONFIG, enabled: true } }, flushPending as any, () => batches, vi.fn(), () => ({ totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0, callCount: 0, totalPrunedRawChars: 0, totalPrunedSummaryChars: 0, retryCount: 0, finalFailureCount: 0, failureCounts: { "rate-limit": 0, network: 0, provider: 0, persistence: 0, cancelled: 0 } }), {} as any);
     const handler = command.register.mock.calls[0][1].handler("now", ctx);
     await vi.waitFor(() => expect(overlay).toBeDefined());
-    expect(overlay!.render(100).join("\n")).toContain("<accent>↻</accent><text> Batch 1/1 · retry 1 · rate limited");
+    expect(retryFrame).toContain("<accent>↻</accent><text> Batch 1/1 · retry 1 · rate limited");
+    expect(overlay!.render(100).join("\n")).toContain(" Batch 1/1 · 1 tool call · retry 1");
 
     release!();
     await handler;

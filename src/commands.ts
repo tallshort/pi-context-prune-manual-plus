@@ -373,8 +373,9 @@ class PruneProgressOverlay extends Container implements Focusable {
     const count = `${row.toolCallCount} tool call${row.toolCallCount === 1 ? "" : "s"}`;
     if (row.status === "running") {
       const frame = SPINNER_FRAMES[Math.floor(Date.now() / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length];
+      const retry = row.retryCount > 0 ? ` · retry ${row.retryCount}` : "";
       const chars = row.receivedChars > 0 ? ` · ${formatCharProgress(row.receivedChars, row.rawChars)}` : "";
-      return `${this.theme.fg("accent", frame)}${this.theme.fg("text", ` ${row.label} · ${count}${chars}`)}`;
+      return `${this.theme.fg("accent", frame)}${this.theme.fg("text", ` ${row.label} · ${count}${retry}${chars}`)}`;
     }
     if (row.status === "retrying") {
       return `${this.theme.fg("accent", "↻")}${this.theme.fg("text", ` ${row.label} · retry ${row.retryCount} · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;

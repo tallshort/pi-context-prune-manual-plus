@@ -115,6 +115,10 @@ export function classifySummarizerFailure(value: unknown): SummarizeFailure {
   return { failureKind: "provider", failureMessage: message || "provider error", retryable: false };
 }
 
+function cooldownFailure(remainingMs: number): SummarizeFailure {
+  return { failureKind: "rate-limit", failureMessage: `provider cooldown: retry in ${Math.ceil(remainingMs / 1000)}s`, retryable: false };
+}
+
 /**
  * Summarizes a captured batch. Returns a summary or a structured, safe failure.
  * Abort remains exceptional so flushPending can preserve its cancellation semantics.
@@ -130,7 +134,7 @@ export async function summarizeBatch(
 
   const remainingCooldownMs = rateLimitGate.remainingMs();
   if (remainingCooldownMs > 0) {
-    return { failureKind: "rate-limit", failureMessage: `provider cooldown: retry in ${Math.ceil(remainingCooldownMs / 1000)}s`, retryable: false };
+    return cooldownFailure(remainingCooldownMs);
   }
   try {
     const model = resolveModel(config, ctx);
@@ -152,14 +156,18 @@ export async function summarizeBatch(
 
     const serialized = serializeBatchForSummarizer(batch);
     const rawCharCount = batch.toolCalls.reduce((sum, call) => sum + call.resultText.length, 0);
-    const startSoftRetry = () => {
-      try { return options.onSoftRetry?.() !== false; } catch { return true; }
+    const startSoftRetry = (): SummarizeFailure | undefined => {
+      const remaining = rateLimitGate.remainingMs();
+      if (remaining > 0) return cooldownFailure(remaining);
+      try { if (options.onSoftRetry?.() === false) return cancelledSoftRetry; } catch { /* Reporting must not stop the retry. */ }
     };
     const cancelledSoftRetry: SummarizeFailure = {
       failureKind: "cancelled", failureMessage: "concise retry cancelled; original results retained", retryable: false,
     };
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = rateLimitGate.remainingMs();
+      if (remaining > 0) return cooldownFailure(remaining);
       const prompt = attempt === 0 ? SYSTEM_PROMPT : RETRY_PROMPT;
       const userMessage = prompt + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
 
@@ -231,14 +239,16 @@ export async function summarizeBatch(
       if (options.signal?.aborted) throw new Error("summarizeBatch: aborted during stream");
       if (oversizedChars !== undefined) return { skippedOversized: true, summaryCharCount: oversizedChars };
       if (softExceeded) {
-        if (!startSoftRetry()) return cancelledSoftRetry;
+        const blocked = startSoftRetry();
+        if (blocked) return blocked;
         continue;
       }
       if (!response) throw new Error("summarizeBatch: provider returned no response");
       reportTextProgress(response);
       if (oversizedChars !== undefined) return { skippedOversized: true, summaryCharCount: oversizedChars };
       if (softExceeded) {
-        if (!startSoftRetry()) return cancelledSoftRetry;
+        const blocked = startSoftRetry();
+        if (blocked) return blocked;
         continue;
       }
       if (response.stopReason === "aborted") throw new Error("summarizeBatch: stream stopped with reason aborted");
