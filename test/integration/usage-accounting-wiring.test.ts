@@ -279,6 +279,26 @@ describe("flush usage accounting", () => {
     expect(entries).not.toContainEqual(expect.objectContaining({ customType: "context-prune-skipped-oversized" }));
   });
 
+  it("numbers a soft retry after a provider retry by the total provider attempts", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream } = setup([
+      response("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      response("x".repeat(4_100)),
+      response("short summary"),
+    ], appendUsage, { streamed: true, rejectResultWhenAborted: true, streamedPartialUsage: true });
+    const progress = vi.fn();
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)], onProgress: progress });
+
+    expect(result).toMatchObject({ ok: true, reason: "flushed" });
+    expect(stream).toHaveBeenCalledTimes(3);
+    expect(appendUsage).toHaveBeenCalledTimes(3);
+    expect(latestStats(entries)).toMatchObject({ callCount: 3, retryCount: 2 });
+    expect(progress.mock.calls.filter((call) => call[3] === "retry").map((call) => call[4]?.retryCount)).toEqual([1, 2]);
+    expect(progress.mock.calls.filter((call) => call[3] === "start").map((call) => call[4]?.retryCount)).toEqual([0, 1, 2]);
+  });
+
   it("accepts a manual retry over 4k and settles the batch when it is shorter than the raw result", async () => {
     let usageEntry = 0;
     const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));

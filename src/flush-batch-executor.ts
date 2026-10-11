@@ -143,13 +143,13 @@ async function executeManualBatches({
             softRetries++;
             flushOptions.onProgress!(index, executions.length, batch, "retry", {
               attempts: attempts + softRetries - 1,
-              retryCount: softRetries,
+              retryCount: attempts + softRetries - 1,
               failureKind: "provider",
               failureMessage: "summary exceeded 4,000 characters — retrying concisely",
             });
             flushOptions.onProgress!(index, executions.length, batch, "start", {
               attempts: attempts + softRetries,
-              retryCount: softRetries,
+              retryCount: attempts + softRetries - 1,
             });
             return true;
           },
