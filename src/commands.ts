@@ -377,7 +377,7 @@ class PruneProgressOverlay extends Container implements Focusable {
       return `${this.theme.fg("accent", frame)}${this.theme.fg("text", ` ${row.label} · ${count}${chars}`)}`;
     }
     if (row.status === "retrying") {
-      return `${this.theme.fg("accent", "↻")}${this.theme.fg("text", ` ${row.label} · retry ${row.retryCount}/1 · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;
+      return `${this.theme.fg("accent", "↻")}${this.theme.fg("text", ` ${row.label} · retry ${row.retryCount} · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;
     }
     if (row.status === "done") return `${this.theme.fg("success", "✓")}${this.theme.fg("text", ` ${row.label} · ${count} · ${formatCharProgress(row.receivedChars, row.rawChars)}`)}`;
     if (row.status === "failed") return `${this.theme.fg("error", "✗")}${this.theme.fg("text", ` ${row.label} · failed after ${row.attempts} attempt${row.attempts === 1 ? "" : "s"} · ${row.failureMessage ?? row.failureKind ?? "provider error"}`)}`;

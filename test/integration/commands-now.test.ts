@@ -135,7 +135,7 @@ describe("/pruner now", () => {
     registerCommands({ registerCommand: command.register, registerMessageRenderer: vi.fn() } as any, { value: { ...DEFAULT_CONFIG, enabled: true } }, flushPending as any, () => batches, vi.fn(), () => ({ totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0, callCount: 0, totalPrunedRawChars: 0, totalPrunedSummaryChars: 0, retryCount: 0, finalFailureCount: 0, failureCounts: { "rate-limit": 0, network: 0, provider: 0, persistence: 0, cancelled: 0 } }), {} as any);
     const handler = command.register.mock.calls[0][1].handler("now", ctx);
     await vi.waitFor(() => expect(overlay).toBeDefined());
-    expect(overlay!.render(100).join("\n")).toContain("<accent>↻</accent><text> Batch 1/1 · retry 1/1 · rate limited");
+    expect(overlay!.render(100).join("\n")).toContain("<accent>↻</accent><text> Batch 1/1 · retry 1 · rate limited");
 
     release!();
     await handler;

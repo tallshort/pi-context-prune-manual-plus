@@ -437,6 +437,8 @@ export interface SummarizeBatchOptions {
   onUsage?: (response: import("@earendil-works/pi-ai").AssistantMessage) => void;
   /** Receives the number of summary text characters streamed so far. */
   onTextProgress?: (receivedChars: number) => void;
+  /** Called once when a soft output limit starts a more concise retry. */
+  onSoftRetry?: () => boolean | void;
   /**
    * Abort signal — when fired the in-flight stream call is cancelled and the
    * batch is treated as aborted (not a summarizer failure).
@@ -452,6 +454,8 @@ export interface SummarizeBatchesOptions {
   onUsage?: (batch: CapturedBatch, response: import("@earendil-works/pi-ai").AssistantMessage) => void;
   /** Receives streamed summary text character counts for each batch. */
   onBatchTextProgress?: BatchTextProgressCallback;
+  /** Reports a soft-limit retry so callers can account for the extra provider request. */
+  onSoftRetry?: (batch: CapturedBatch) => void;
   /**
    * Abort signal forwarded to every individual summarizeBatch() call.
    * When fired, all in-flight stream calls are cancelled.

@@ -78,6 +78,7 @@ export async function executeFlushBatches({
       : await summarizeBatches(eligible.map(({ batch }) => batch), getConfig(), ctx, {
           onBatchTextProgress: reportTextProgress,
           onUsage,
+          onSoftRetry: () => stats.addRetry(),
           signal: flushOptions.signal,
         });
     eligible.forEach((execution, index) => {
@@ -127,14 +128,31 @@ async function executeManualBatches({
       }
 
       let attempts = 0;
+      let softRetries = 0;
       const attempt = async () => {
         attempts += 1;
-        flushOptions.onProgress!(index, executions.length, batch, "start", { attempts, retryCount: attempts - 1 });
+        flushOptions.onProgress!(index, executions.length, batch, "start", { attempts: attempts + softRetries, retryCount: attempts + softRetries - 1 });
         return summarizeBatch(batch, getConfig(), ctx, {
           // Manual cancellation is soft: already-started provider calls finish.
           signal: undefined,
           onUsage: (response) => onUsage(batch, response),
           notifyOnFailure: false,
+          onSoftRetry: () => {
+            if (flushOptions.signal?.aborted) return false;
+            stats.addRetry();
+            softRetries++;
+            flushOptions.onProgress!(index, executions.length, batch, "retry", {
+              attempts: attempts + softRetries - 1,
+              retryCount: softRetries,
+              failureKind: "provider",
+              failureMessage: "summary exceeded 4,000 characters — retrying concisely",
+            });
+            flushOptions.onProgress!(index, executions.length, batch, "start", {
+              attempts: attempts + softRetries,
+              retryCount: softRetries,
+            });
+            return true;
+          },
           onTextProgress: (receivedChars) => reportTextProgress(index, executions.length, batch, receivedChars),
         });
       };
@@ -142,16 +160,16 @@ async function executeManualBatches({
       const retry = await runWithOneRetry(attempt, async (result) => {
         if (!isSummarizeFailure(result) || !result.retryable || flushOptions.signal?.aborted) return false;
         flushOptions.onProgress!(index, executions.length, batch, "retry", {
-          attempts: 1,
-          retryCount: 1,
+          attempts: attempts + softRetries,
+          retryCount: attempts + softRetries,
           failureKind: result.failureKind,
           failureMessage: result.failureMessage,
         });
         if (result.failureKind !== "rate-limit") return true;
         return waitForSummarizerCooldown(flushOptions.signal, (remainingMs) => {
           flushOptions.onProgress!(index, executions.length, batch, "retry", {
-            attempts: 1,
-            retryCount: 1,
+            attempts: attempts + softRetries,
+            retryCount: attempts + softRetries,
             failureKind: result.failureKind,
             failureMessage: `rate limited — retrying in ${Math.ceil(remainingMs / 1_000)}s`,
           });
@@ -164,15 +182,15 @@ async function executeManualBatches({
       } else if (isSummarizeFailure(execution.result)) {
         stats.addFinalFailure(execution.result.failureKind);
         flushOptions.onProgress!(index, executions.length, batch, "failed", {
-          attempts: retry.attempts,
-          retryCount: retry.retryCount,
+          attempts: retry.attempts + softRetries,
+          retryCount: retry.retryCount + softRetries,
           failureKind: execution.result.failureKind,
           failureMessage: execution.result.failureMessage,
         });
       } else {
         flushOptions.onProgress!(index, executions.length, batch, "done", {
-          attempts: retry.attempts,
-          retryCount: retry.retryCount,
+          attempts: retry.attempts + softRetries,
+          retryCount: retry.retryCount + softRetries,
         });
       }
       return execution.result;

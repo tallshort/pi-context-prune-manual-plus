@@ -262,6 +262,89 @@ describe("flush usage accounting", () => {
     expect(latestStats(entries)).toMatchObject({ callCount: 2, retryCount: 1, totalCost: 0.2 });
   });
 
+  it("counts each soft-limit provider attempt and shows the concise retry during manual flushing", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream } = setup([response("x".repeat(4_100)), response("short summary")], appendUsage,
+      { streamed: true, rejectResultWhenAborted: true, streamedPartialUsage: true });
+    const progress = vi.fn();
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)], onProgress: progress });
+
+    expect(result).toMatchObject({ ok: true, reason: "flushed" });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(appendUsage).toHaveBeenCalledTimes(2);
+    expect(latestStats(entries)).toMatchObject({ callCount: 2, retryCount: 1, totalCost: 0.2 });
+    expect(progress.mock.calls.some((call) => call[3] === "retry" && call[4]?.retryCount === 1)).toBe(true);
+    expect(entries).not.toContainEqual(expect.objectContaining({ customType: "context-prune-skipped-oversized" }));
+  });
+
+  it("accepts a manual retry over 4k and settles the batch when it is shorter than the raw result", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream } = setup([response("x".repeat(4_100)), response("y".repeat(4_100))], appendUsage,
+      { streamed: true, rejectResultWhenAborted: true, streamedPartialUsage: true });
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)], onProgress: vi.fn() });
+
+    expect(result).toMatchObject({ ok: true, reason: "flushed" });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(appendUsage).toHaveBeenCalledTimes(2);
+    expect(latestStats(entries)).toMatchObject({ callCount: 2, retryCount: 1, finalFailureCount: 0 });
+    expect(entries).not.toContainEqual(expect.objectContaining({ customType: "context-prune-skipped-oversized" }));
+  });
+
+  it("persists an oversized skip if the concise retry passes the original result length", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream } = setup([response("x".repeat(4_100)), response("y".repeat(5_001))], appendUsage,
+      { streamed: true, rejectResultWhenAborted: true, streamedPartialUsage: true });
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)], onProgress: vi.fn() });
+
+    expect(result).toMatchObject({ ok: true, reason: "skipped-oversized" });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(appendUsage).toHaveBeenCalledTimes(2);
+    expect(latestStats(entries)).toMatchObject({ callCount: 2, retryCount: 1, finalFailureCount: 0 });
+    expect(entries).toContainEqual(expect.objectContaining({
+      customType: "context-prune-skipped-oversized",
+      data: expect.objectContaining({ toolCallIds: ["call-1"] }),
+    }));
+  });
+
+  it("does not start the concise retry if manual pruning is cancelled during the first stream", async () => {
+    const controller = new AbortController();
+    const appendUsage = vi.fn(() => ({ id: "usage-1", timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries, stream } = setup(response("x".repeat(4_100)), appendUsage,
+      { streamed: true, rejectResultWhenAborted: true, streamedPartialUsage: true });
+
+    const result = await harness.flush!(ctx, {
+      previewedBatches: [batch(5_000)],
+      signal: controller.signal,
+      onProgress: vi.fn(),
+      onBatchTextProgress: (_index: number, _total: number, _batch: CapturedBatch, chars: number) => {
+        if (chars > 4_000) controller.abort();
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(appendUsage).toHaveBeenCalledTimes(1);
+    expect(latestStats(entries)).toMatchObject({ callCount: 1, retryCount: 0 });
+    expect(entries).not.toContainEqual(expect.objectContaining({ customType: "context-prune-skipped-oversized" }));
+  });
+
+  it("counts a soft-limit retry in automatic summarization too", async () => {
+    let usageEntry = 0;
+    const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
+    const { ctx, entries } = setup([response("x".repeat(4_100)), response("y".repeat(4_100))], appendUsage,
+      { streamed: true, rejectResultWhenAborted: true, streamedPartialUsage: true });
+
+    const result = await harness.flush!(ctx, { previewedBatches: [batch(5_000)] });
+
+    expect(result).toMatchObject({ ok: true, reason: "flushed" });
+    expect(latestStats(entries)).toMatchObject({ callCount: 2, retryCount: 1 });
+  });
   it("waits for parallel responses and persists their usage when the first batch fails", async () => {
     let usageEntry = 0;
     const appendUsage = vi.fn(() => ({ id: `usage-${++usageEntry}`, timestamp: "2026-01-02T03:04:05.000Z" }));
